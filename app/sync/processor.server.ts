@@ -2,6 +2,7 @@ import type { SyncItem } from "@prisma/client";
 import db from "../db.server";
 import { unauthenticated } from "../shopify.server";
 import {
+  bookInvoicePayment,
   createCreditNoteForOrder,
   createInvoiceForOrder,
   findInvoicesByOrderName,
@@ -16,6 +17,14 @@ const ORDER_FOR_SYNC_QUERY = `#graphql
       id
       name
       email
+      displayFinancialStatus
+      currentTotalPriceSet {
+        shopMoney {
+          amount
+        }
+      }
+      paymentGatewayNames
+      processedAt
       customer {
         id
         firstName
@@ -68,6 +77,10 @@ interface OrderForSyncResponse {
       id: string;
       name: string;
       email: string | null;
+      displayFinancialStatus: string | null;
+      currentTotalPriceSet: { shopMoney: { amount: string } };
+      paymentGatewayNames: string[];
+      processedAt: string | null;
       customer: {
         id: string;
         firstName: string | null;
@@ -281,13 +294,30 @@ async function handleInvoiceTopic(
     return;
   }
 
+  const orderTotal = Number(order.currentTotalPriceSet.shopMoney.amount);
+  if (orderTotal === 0) {
+    console.log(`Order ${realOrderName} has a zero total, skipping invoice`);
+    await db.syncItem.update({
+      where: { id: item.id },
+      data: {
+        status: "skipped_no_invoice",
+        lastError: "Zero-value order — no invoice needed",
+        shopifyOrderName: realOrderName,
+      },
+    });
+    return;
+  }
+
   const contact = await upsertContactByEmail(
     buildContactInput(order, settings.sevdeskCategoryId),
   );
+  const invoiceDate = new Date();
+  const deliverDate = order.processedAt ? new Date(order.processedAt) : invoiceDate;
   const invoice = await createInvoiceForOrder({
     orderName: realOrderName,
     contactId: contact.id,
-    invoiceDate: new Date(),
+    invoiceDate,
+    deliverDate,
     lineItems: buildLineItems(order),
     address: resolveAddress(order),
     contactPersonId: settings.sevdeskContactPersonId,
@@ -297,6 +327,7 @@ async function handleInvoiceTopic(
   });
 
   console.log(`Created invoice for order ${realOrderName}`);
+  await bookPaymentIfApplicable(item.shop, realOrderName, invoice.id, order);
   await applyShopifyTags(item.shop, realOrderName, invoice.id, "Invoice");
   await db.syncItem.update({
     where: { id: item.id },
@@ -306,6 +337,53 @@ async function handleInvoiceTopic(
       shopifyOrderName: realOrderName,
     },
   });
+}
+
+// A booking failure must never undo an already-created invoice — the invoice
+// is the primary accounting artifact, payment status is a secondary nicety.
+async function bookPaymentIfApplicable(
+  shop: string,
+  orderName: string,
+  invoiceId: string,
+  order: NonNullable<OrderForSyncResponse["data"]["order"]>,
+): Promise<void> {
+  try {
+    if (order.displayFinancialStatus !== "PAID") {
+      return;
+    }
+    if (order.paymentGatewayNames.length !== 1) {
+      console.log(
+        `Order ${orderName} has ${order.paymentGatewayNames.length} payment gateways, skipping payment booking`,
+      );
+      return;
+    }
+    const gatewayName = order.paymentGatewayNames[0];
+    const mapping = await db.paymentAccountMapping.findUnique({
+      where: { shop_gatewayName: { shop, gatewayName } },
+    });
+    const checkAccountId =
+      mapping?.checkAccountId ??
+      (await db.syncSettings.findUnique({ where: { shop } }))
+        ?.defaultCheckAccountId;
+
+    if (!checkAccountId) {
+      console.log(
+        `No check account configured for gateway "${gatewayName}" on order ${orderName}, skipping payment booking`,
+      );
+      return;
+    }
+
+    await bookInvoicePayment({
+      invoiceId,
+      amount: Number(order.currentTotalPriceSet.shopMoney.amount),
+      date: (order.processedAt ?? new Date().toISOString()).slice(0, 10),
+      checkAccountId,
+    });
+  } catch (error) {
+    console.error(
+      `Failed to book payment for order ${orderName}: ${String(error)}`,
+    );
+  }
 }
 
 async function handleCreditNoteTopic(

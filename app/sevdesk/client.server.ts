@@ -1,4 +1,4 @@
-import { sevGet, sevPost } from "./http.server";
+import { sevGet, sevPost, sevPut } from "./http.server";
 import type {
   ContactInput,
   CreateCreditNoteInput,
@@ -121,6 +121,7 @@ export async function createInvoiceForOrder(
         contact: { id: input.contactId, objectName: "Contact" },
         contactPerson: { id: input.contactPersonId, objectName: "SevUser" },
         invoiceDate: formatDate(input.invoiceDate),
+        deliveryDate: formatDate(input.deliverDate),
         status: input.status,
         invoiceType: "RE",
         currency: input.currency,
@@ -277,4 +278,34 @@ interface RawTaxRule {
 export async function listTaxRules(): Promise<{ id: string; name: string }[]> {
   const rules = await sevGet<RawTaxRule>("/TaxRule");
   return rules.map((rule) => ({ id: rule.id, name: rule.name }));
+}
+
+export interface SevDeskCheckAccount {
+  id: string;
+  name: string;
+}
+
+interface RawCheckAccount {
+  id: string;
+  name: string;
+}
+
+export async function listCheckAccounts(): Promise<SevDeskCheckAccount[]> {
+  const accounts = await sevGet<RawCheckAccount>("/CheckAccount");
+  return accounts.map((account) => ({ id: account.id, name: account.name }));
+}
+
+export async function bookInvoicePayment(input: {
+  invoiceId: string;
+  amount: number;
+  date: string;
+  checkAccountId: string;
+}): Promise<void> {
+  await sevPut(`/Invoice/${input.invoiceId}/bookAmount`, {
+    amount: input.amount,
+    date: input.date,
+    type: "N",
+    checkAccount: { id: input.checkAccountId, objectName: "CheckAccount" },
+    createFeed: true,
+  });
 }

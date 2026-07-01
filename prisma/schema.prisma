@@ -42,7 +42,19 @@ model SyncSettings {
   sevdeskCategoryId      String?
   invoiceStatus          String?  // "100" (Draft) or "1000" (Open) — null means "not configured yet"
   currency               String?
+  defaultCheckAccountId  String?  // fallback for gateways with no PaymentAccountMapping row
   updatedAt              DateTime @updatedAt
+}
+
+// Shopify payment gateway name (e.g. "shopify_payments", "paypal") -> SevDesk check account.
+model PaymentAccountMapping {
+  id             String   @id @default(cuid())
+  shop           String
+  gatewayName    String
+  checkAccountId String
+  updatedAt      DateTime @updatedAt
+
+  @@unique([shop, gatewayName])
 }
 
 // Doubles as the worker's queue (status = "pending") and the admin UI's log. No customer PII.

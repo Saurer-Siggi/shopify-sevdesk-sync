@@ -1,8 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  bookInvoicePayment,
   createCreditNoteForOrder,
   createInvoiceForOrder,
   findInvoicesByOrderName,
+  listCheckAccounts,
   listSevUsers,
   listTaxRules,
   tagObject,
@@ -189,6 +191,7 @@ describe("createInvoiceForOrder", () => {
       orderName: "#1050",
       contactId: "501",
       invoiceDate: new Date("2026-07-01T00:00:00.000Z"),
+      deliverDate: new Date("2026-06-30T00:00:00.000Z"),
       lineItems: [
         { name: "Kräuterlikör 0,7l", quantity: 2, unitPriceGross: 19.99, taxRatePercent: 19 },
         { name: "Bio-Apfelsaft 1l", quantity: 1, unitPriceGross: 3.49, taxRatePercent: 7 },
@@ -207,6 +210,8 @@ describe("createInvoiceForOrder", () => {
     const body = JSON.parse(init.body as string);
 
     expect(body.invoice.customerInternalNote).toBe("#1050");
+    expect(body.invoice.invoiceDate).toBe("2026-07-01");
+    expect(body.invoice.deliveryDate).toBe("2026-06-30");
     expect(body.invoice.taxRule).toEqual({ id: "1", objectName: "TaxRule" });
     // SevDesk rejects invoice creation with a DB-level error if this header field is missing.
     expect(body.invoice.taxRate).toBe(19);
@@ -249,6 +254,7 @@ describe("createInvoiceForOrder", () => {
       orderName: "#1051",
       contactId: "502",
       invoiceDate: new Date("2026-07-01T00:00:00.000Z"),
+      deliverDate: new Date("2026-06-30T00:00:00.000Z"),
       lineItems: [
         { name: "Kräuterlikör 0,7l", quantity: 1, unitPriceGross: 19.99, taxRatePercent: 19 },
       ],
@@ -342,6 +348,47 @@ describe("listTaxRules", () => {
     expect(result).toEqual([{ id: "1", name: "Standard 19%" }]);
     const [url] = fetchMock.mock.calls[0] as [URL];
     expect(url.toString()).toContain("/TaxRule");
+  });
+});
+
+describe("listCheckAccounts", () => {
+  it("maps raw CheckAccount objects to id/name", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        objects: [{ id: "42", name: "Bank Girokonto" }],
+      }),
+    );
+
+    const result = await listCheckAccounts();
+
+    expect(result).toEqual([{ id: "42", name: "Bank Girokonto" }]);
+    const [url] = fetchMock.mock.calls[0] as [URL];
+    expect(url.toString()).toContain("/CheckAccount");
+  });
+});
+
+describe("bookInvoicePayment", () => {
+  it("PUTs the expected bookAmount payload", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ objects: {} }));
+
+    await bookInvoicePayment({
+      invoiceId: "1001",
+      amount: 23.48,
+      date: "2026-06-30",
+      checkAccountId: "42",
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toContain("/Invoice/1001/bookAmount");
+    expect(init.method).toBe("PUT");
+    const body = JSON.parse(init.body as string);
+    expect(body).toEqual({
+      amount: 23.48,
+      date: "2026-06-30",
+      type: "N",
+      checkAccount: { id: "42", objectName: "CheckAccount" },
+      createFeed: true,
+    });
   });
 });
 

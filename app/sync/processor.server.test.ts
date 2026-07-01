@@ -6,12 +6,14 @@ const upsertContactByEmailMock = vi.fn();
 const createInvoiceForOrderMock = vi.fn();
 const createCreditNoteForOrderMock = vi.fn();
 const tagObjectMock = vi.fn().mockResolvedValue(undefined);
+const bookInvoicePaymentMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("../sevdesk/client.server", () => ({
   findInvoicesByOrderName: findInvoicesByOrderNameMock,
   upsertContactByEmail: upsertContactByEmailMock,
   createInvoiceForOrder: createInvoiceForOrderMock,
   createCreditNoteForOrder: createCreditNoteForOrderMock,
   tagObject: tagObjectMock,
+  bookInvoicePayment: bookInvoicePaymentMock,
 }));
 
 const graphqlMock = vi.fn();
@@ -22,10 +24,12 @@ vi.mock("../shopify.server", () => ({
 
 const syncItemUpdateMock = vi.fn();
 const syncSettingsFindUniqueMock = vi.fn();
+const paymentAccountMappingFindUniqueMock = vi.fn();
 vi.mock("../db.server", () => ({
   default: {
     syncItem: { update: syncItemUpdateMock },
     syncSettings: { findUnique: syncSettingsFindUniqueMock },
+    paymentAccountMapping: { findUnique: paymentAccountMappingFindUniqueMock },
   },
 }));
 
@@ -39,6 +43,10 @@ function makeOrderResponse(overrides: {
   name?: string;
   email?: string | null;
   customerEmail?: string | null;
+  displayFinancialStatus?: string | null;
+  totalAmount?: string;
+  paymentGatewayNames?: string[];
+  processedAt?: string | null;
 } = {}) {
   return jsonResponse({
     data: {
@@ -46,6 +54,15 @@ function makeOrderResponse(overrides: {
         id: "gid://shopify/Order/1050",
         name: overrides.name ?? "#1050",
         email: overrides.email ?? null,
+        displayFinancialStatus: overrides.displayFinancialStatus ?? "PAID",
+        currentTotalPriceSet: {
+          shopMoney: { amount: overrides.totalAmount ?? "25.00" },
+        },
+        paymentGatewayNames: overrides.paymentGatewayNames ?? ["shopify_payments"],
+        processedAt:
+          overrides.processedAt === undefined
+            ? "2026-06-01T10:00:00.000Z"
+            : overrides.processedAt,
         customer: {
           id: "gid://shopify/Customer/1",
           firstName: "Max",
@@ -108,8 +125,10 @@ beforeEach(() => {
     sevdeskCategoryId: "3",
     invoiceStatus: "100",
     currency: "EUR",
+    defaultCheckAccountId: null,
     updatedAt: new Date("2026-06-01T00:00:00Z"),
   });
+  paymentAccountMappingFindUniqueMock.mockResolvedValue(null);
 });
 
 describe("processSyncItem — invoice topics", () => {
@@ -156,6 +175,7 @@ describe("processSyncItem — invoice topics", () => {
       orderName: "#1050",
       contactId: "contact-1",
       invoiceDate: expect.any(Date),
+      deliverDate: new Date("2026-06-01T10:00:00.000Z"),
       lineItems: [
         {
           name: "Sauerkirsch Likör 0.5l",
@@ -180,11 +200,32 @@ describe("processSyncItem — invoice topics", () => {
       "Invoice",
       ["Shopify", "example", "#1050"],
     );
+    expect(bookInvoicePaymentMock).not.toHaveBeenCalled();
     expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
       where: { id: "item-1" },
       data: {
         status: "success",
         sevdeskInvoiceId: "sd-invoice-1",
+        shopifyOrderName: "#1050",
+      },
+    });
+  });
+
+  it("skips invoice creation for a zero-value order", async () => {
+    graphqlMock.mockResolvedValueOnce(makeOrderResponse({ totalAmount: "0.00" }));
+    findInvoicesByOrderNameMock.mockResolvedValueOnce([]);
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(upsertContactByEmailMock).not.toHaveBeenCalled();
+    expect(createInvoiceForOrderMock).not.toHaveBeenCalled();
+    expect(bookInvoicePaymentMock).not.toHaveBeenCalled();
+    expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
+      where: { id: "item-1" },
+      data: {
+        status: "skipped_no_invoice",
+        lastError: "Zero-value order — no invoice needed",
         shopifyOrderName: "#1050",
       },
     });
@@ -208,6 +249,166 @@ describe("processSyncItem — invoice topics", () => {
       data: {
         status: "success",
         sevdeskInvoiceId: "sd-invoice-2",
+        shopifyOrderName: "#1050",
+      },
+    });
+  });
+});
+
+describe("processSyncItem — payment booking", () => {
+  beforeEach(() => {
+    upsertContactByEmailMock.mockResolvedValue({ id: "contact-1" });
+    createInvoiceForOrderMock.mockResolvedValue({
+      id: "sd-invoice-1",
+      invoiceNumber: "RN-2026-0002",
+    });
+  });
+
+  it("books the payment when paid with a single gateway and a mapping exists", async () => {
+    graphqlMock.mockResolvedValueOnce(makeOrderResponse({ totalAmount: "25.00" }));
+    findInvoicesByOrderNameMock.mockResolvedValueOnce([]);
+    paymentAccountMappingFindUniqueMock.mockResolvedValueOnce({
+      id: "map-1",
+      shop: SHOP,
+      gatewayName: "shopify_payments",
+      checkAccountId: "42",
+      updatedAt: new Date("2026-06-01T00:00:00Z"),
+    });
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(paymentAccountMappingFindUniqueMock).toHaveBeenCalledExactlyOnceWith({
+      where: { shop_gatewayName: { shop: SHOP, gatewayName: "shopify_payments" } },
+    });
+    expect(bookInvoicePaymentMock).toHaveBeenCalledExactlyOnceWith({
+      invoiceId: "sd-invoice-1",
+      amount: 25,
+      date: "2026-06-01",
+      checkAccountId: "42",
+    });
+    expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
+      where: { id: "item-1" },
+      data: {
+        status: "success",
+        sevdeskInvoiceId: "sd-invoice-1",
+        shopifyOrderName: "#1050",
+      },
+    });
+  });
+
+  it("falls back to the default check account when no gateway mapping exists", async () => {
+    graphqlMock.mockResolvedValueOnce(makeOrderResponse());
+    findInvoicesByOrderNameMock.mockResolvedValueOnce([]);
+    paymentAccountMappingFindUniqueMock.mockResolvedValueOnce(null);
+    syncSettingsFindUniqueMock.mockResolvedValue({
+      shop: SHOP,
+      syncEnabled: true,
+      sevdeskContactPersonId: "999",
+      sevdeskTaxRuleId: "1",
+      sevdeskCategoryId: "3",
+      invoiceStatus: "100",
+      currency: "EUR",
+      defaultCheckAccountId: "99",
+      updatedAt: new Date("2026-06-01T00:00:00Z"),
+    });
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(bookInvoicePaymentMock).toHaveBeenCalledExactlyOnceWith({
+      invoiceId: "sd-invoice-1",
+      amount: 25,
+      date: "2026-06-01",
+      checkAccountId: "99",
+    });
+  });
+
+  it("skips booking (but still succeeds) when no mapping and no default check account exist", async () => {
+    graphqlMock.mockResolvedValueOnce(makeOrderResponse());
+    findInvoicesByOrderNameMock.mockResolvedValueOnce([]);
+    paymentAccountMappingFindUniqueMock.mockResolvedValueOnce(null);
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(bookInvoicePaymentMock).not.toHaveBeenCalled();
+    expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
+      where: { id: "item-1" },
+      data: {
+        status: "success",
+        sevdeskInvoiceId: "sd-invoice-1",
+        shopifyOrderName: "#1050",
+      },
+    });
+  });
+
+  it("skips booking when the order is not paid", async () => {
+    graphqlMock.mockResolvedValueOnce(
+      makeOrderResponse({ displayFinancialStatus: "PENDING" }),
+    );
+    findInvoicesByOrderNameMock.mockResolvedValueOnce([]);
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(paymentAccountMappingFindUniqueMock).not.toHaveBeenCalled();
+    expect(bookInvoicePaymentMock).not.toHaveBeenCalled();
+  });
+
+  it("skips booking when the order has multiple payment gateways", async () => {
+    graphqlMock.mockResolvedValueOnce(
+      makeOrderResponse({ paymentGatewayNames: ["shopify_payments", "paypal"] }),
+    );
+    findInvoicesByOrderNameMock.mockResolvedValueOnce([]);
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(paymentAccountMappingFindUniqueMock).not.toHaveBeenCalled();
+    expect(bookInvoicePaymentMock).not.toHaveBeenCalled();
+    expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
+      where: { id: "item-1" },
+      data: {
+        status: "success",
+        sevdeskInvoiceId: "sd-invoice-1",
+        shopifyOrderName: "#1050",
+      },
+    });
+  });
+
+  it("skips booking when the order has no payment gateways", async () => {
+    graphqlMock.mockResolvedValueOnce(
+      makeOrderResponse({ paymentGatewayNames: [] }),
+    );
+    findInvoicesByOrderNameMock.mockResolvedValueOnce([]);
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(bookInvoicePaymentMock).not.toHaveBeenCalled();
+  });
+
+  it("still marks the SyncItem success when booking throws", async () => {
+    graphqlMock.mockResolvedValueOnce(makeOrderResponse());
+    findInvoicesByOrderNameMock.mockResolvedValueOnce([]);
+    paymentAccountMappingFindUniqueMock.mockResolvedValueOnce({
+      id: "map-1",
+      shop: SHOP,
+      gatewayName: "shopify_payments",
+      checkAccountId: "42",
+      updatedAt: new Date("2026-06-01T00:00:00Z"),
+    });
+    bookInvoicePaymentMock.mockRejectedValueOnce(new Error("SevDesk API down"));
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
+      where: { id: "item-1" },
+      data: {
+        status: "success",
+        sevdeskInvoiceId: "sd-invoice-1",
         shopifyOrderName: "#1050",
       },
     });
@@ -356,6 +557,10 @@ describe("processSyncItem — error handling", () => {
             id: "gid://shopify/Order/1050",
             name: "#1050",
             email: null,
+            displayFinancialStatus: "PAID",
+            currentTotalPriceSet: { shopMoney: { amount: "25.00" } },
+            paymentGatewayNames: ["shopify_payments"],
+            processedAt: "2026-06-01T10:00:00.000Z",
             customer: {
               id: "gid://shopify/Customer/1",
               firstName: "Max",

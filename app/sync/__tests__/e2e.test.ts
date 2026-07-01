@@ -93,6 +93,10 @@ vi.mock("../../shopify.server", () => ({
                 id: ORDER_GID,
                 name: ORDER_NAME,
                 email: "customer@example.invalid",
+                displayFinancialStatus: "PENDING",
+                currentTotalPriceSet: { shopMoney: { amount: "25.80" } },
+                paymentGatewayNames: ["shopify_payments"],
+                processedAt: "2026-06-01T10:00:00.000Z",
                 customer: {
                   id: "gid://shopify/Customer/1",
                   firstName: "Erika",

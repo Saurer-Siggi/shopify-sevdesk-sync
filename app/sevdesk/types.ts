@@ -37,6 +37,7 @@ export interface CreateInvoiceInput {
   orderName: string;
   contactId: string;
   invoiceDate: Date;
+  deliverDate: Date;
   lineItems: OrderLineItem[];
   address: OrderAddress;
   contactPersonId: string;

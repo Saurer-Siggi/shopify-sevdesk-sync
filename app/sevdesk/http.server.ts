@@ -46,3 +46,18 @@ export async function sevPost<T>(path: string, body: unknown): Promise<T> {
   }
   return (await res.json()) as T;
 }
+
+export async function sevPut<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(BASE_URL + path, {
+    method: "PUT",
+    headers: {
+      Authorization: authHeader(),
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    throw new SevDeskApiError(path, res.status, await res.text());
+  }
+  return (await res.json()) as T;
+}
