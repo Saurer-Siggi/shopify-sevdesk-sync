@@ -9,7 +9,7 @@ const INVOICED_ORDER_NAMES_LIMIT = 500;
 
 const ORDERS_FOR_SYNC_ALL_QUERY = `#graphql
   query OrdersForSyncAll($first: Int!, $after: String) {
-    orders(first: $first, after: $after, sortKey: CREATED_AT) {
+    orders(first: $first, after: $after, sortKey: CREATED_AT, query: "status:any") {
       edges {
         cursor
         node {
@@ -129,7 +129,7 @@ export async function syncOrders(
 
 const ORDERS_FORWARD_QUERY = `#graphql
   query OrdersForward($first: Int!, $after: String) {
-    orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) {
+    orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true, query: "status:any") {
       nodes {
         id
         name
@@ -148,7 +148,7 @@ const ORDERS_FORWARD_QUERY = `#graphql
 
 const ORDERS_BACKWARD_QUERY = `#graphql
   query OrdersBackward($last: Int!, $before: String) {
-    orders(last: $last, before: $before, sortKey: CREATED_AT, reverse: true) {
+    orders(last: $last, before: $before, sortKey: CREATED_AT, reverse: true, query: "status:any") {
       nodes {
         id
         name
