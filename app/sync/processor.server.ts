@@ -6,6 +6,7 @@ import {
   createCreditNoteForOrder,
   createInvoiceForOrder,
   findInvoicesByOrderName,
+  markInvoiceAsSent,
   tagObject,
   upsertContactByEmail,
 } from "../sevdesk/client.server";
@@ -104,6 +105,9 @@ interface OrderForSyncResponse {
 
 const INVOICE_TOPICS = new Set(["orders/create", "orders/paid", "backfill"]);
 const CREDIT_NOTE_TOPICS = new Set(["orders/cancelled", "refunds/create"]);
+// SyncSettings.invoiceStatus target: "100" leaves invoices as Draft, "1000"
+// finalizes them (send + book payment) since Shopify orders are prepaid.
+const TARGET_STATUS_PAID = "1000";
 
 interface ResolvedSevDeskSettings {
   sevdeskContactPersonId: string;
@@ -324,11 +328,12 @@ async function handleInvoiceTopic(
     contactPersonId: settings.sevdeskContactPersonId,
     taxRuleId: settings.sevdeskTaxRuleId,
     currency: settings.currency,
-    status: settings.invoiceStatus,
   });
 
   console.log(`Created invoice for order ${realOrderName}`);
-  await bookPaymentIfApplicable(item.shop, realOrderName, invoice.id, order);
+  if (settings.invoiceStatus === TARGET_STATUS_PAID) {
+    await finalizeInvoice(item.shop, realOrderName, invoice.id, order);
+  }
   await applyShopifyTags(item.shop, realOrderName, invoice.id, "Invoice");
   await db.syncItem.update({
     where: { id: item.id },
@@ -340,8 +345,25 @@ async function handleInvoiceTopic(
   });
 }
 
-// A booking failure must never undo an already-created invoice — the invoice
-// is the primary accounting artifact, payment status is a secondary nicety.
+// A finalization failure must never undo an already-created invoice — the
+// invoice is the primary accounting artifact, payment status is secondary.
+async function finalizeInvoice(
+  shop: string,
+  orderName: string,
+  invoiceId: string,
+  order: NonNullable<OrderForSyncResponse["data"]["order"]>,
+): Promise<void> {
+  try {
+    await markInvoiceAsSent(invoiceId);
+  } catch (error) {
+    console.error(
+      `Failed to mark invoice as sent for order ${orderName}: ${String(error)}`,
+    );
+    return;
+  }
+  await bookPaymentIfApplicable(shop, orderName, invoiceId, order);
+}
+
 async function bookPaymentIfApplicable(
   shop: string,
   orderName: string,
@@ -427,7 +449,6 @@ async function handleCreditNoteTopic(
     contactPersonId: settings.sevdeskContactPersonId,
     taxRuleId: settings.sevdeskTaxRuleId,
     currency: settings.currency,
-    status: settings.invoiceStatus,
   });
 
   console.log(`Created credit note for order ${realOrderName}`);

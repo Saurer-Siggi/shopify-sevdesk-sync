@@ -43,7 +43,6 @@ export interface CreateInvoiceInput {
   contactPersonId: string;
   taxRuleId: string;
   currency: string;
-  status: string;
 }
 
 export interface CreateCreditNoteInput {
@@ -56,5 +55,4 @@ export interface CreateCreditNoteInput {
   contactPersonId: string;
   taxRuleId: string;
   currency: string;
-  status: string;
 }

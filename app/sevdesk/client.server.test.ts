@@ -200,7 +200,6 @@ describe("createInvoiceForOrder", () => {
       contactPersonId: "999",
       taxRuleId: "1",
       currency: "EUR",
-      status: "100",
     });
 
     expect(result).toEqual({ id: "1001", invoiceNumber: "RN-2026-2000" });
@@ -262,7 +261,6 @@ describe("createInvoiceForOrder", () => {
       contactPersonId: "999",
       taxRuleId: "1",
       currency: "EUR",
-      status: "100",
     });
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -289,7 +287,6 @@ describe("createCreditNoteForOrder", () => {
       contactPersonId: "999",
       taxRuleId: "1",
       currency: "EUR",
-      status: "100",
     });
 
     expect(result).toEqual({ id: "2001" });

@@ -7,6 +7,7 @@ const createInvoiceForOrderMock = vi.fn();
 const createCreditNoteForOrderMock = vi.fn();
 const tagObjectMock = vi.fn().mockResolvedValue(undefined);
 const bookInvoicePaymentMock = vi.fn().mockResolvedValue(undefined);
+const markInvoiceAsSentMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("../sevdesk/client.server", () => ({
   findInvoicesByOrderName: findInvoicesByOrderNameMock,
   upsertContactByEmail: upsertContactByEmailMock,
@@ -14,6 +15,7 @@ vi.mock("../sevdesk/client.server", () => ({
   createCreditNoteForOrder: createCreditNoteForOrderMock,
   tagObject: tagObjectMock,
   bookInvoicePayment: bookInvoicePaymentMock,
+  markInvoiceAsSent: markInvoiceAsSentMock,
 }));
 
 const graphqlMock = vi.fn();
@@ -193,7 +195,6 @@ describe("processSyncItem — invoice topics", () => {
       contactPersonId: "999",
       taxRuleId: "1",
       currency: "EUR",
-      status: "100",
     });
     expect(tagObjectMock).toHaveBeenCalledExactlyOnceWith(
       "sd-invoice-1",
@@ -262,6 +263,19 @@ describe("processSyncItem — payment booking", () => {
       id: "sd-invoice-1",
       invoiceNumber: "RN-2026-0002",
     });
+    // Booking only ever runs once the invoice is finalized (target status
+    // "1000") — SevDesk refuses to book a payment against a Draft.
+    syncSettingsFindUniqueMock.mockResolvedValue({
+      shop: SHOP,
+      syncEnabled: true,
+      sevdeskContactPersonId: "999",
+      sevdeskTaxRuleId: "1",
+      sevdeskCategoryId: "3",
+      invoiceStatus: "1000",
+      currency: "EUR",
+      defaultCheckAccountId: null,
+      updatedAt: new Date("2026-06-01T00:00:00Z"),
+    });
   });
 
   it("books the payment when paid with a single gateway and a mapping exists", async () => {
@@ -278,6 +292,7 @@ describe("processSyncItem — payment booking", () => {
 
     await processSyncItem(makeSyncItem());
 
+    expect(markInvoiceAsSentMock).toHaveBeenCalledExactlyOnceWith("sd-invoice-1");
     expect(paymentAccountMappingFindUniqueMock).toHaveBeenCalledExactlyOnceWith({
       where: { shop_gatewayName: { shop: SHOP, gatewayName: "shopify_payments" } },
     });
@@ -307,7 +322,7 @@ describe("processSyncItem — payment booking", () => {
       sevdeskContactPersonId: "999",
       sevdeskTaxRuleId: "1",
       sevdeskCategoryId: "3",
-      invoiceStatus: "100",
+      invoiceStatus: "1000",
       currency: "EUR",
       defaultCheckAccountId: "99",
       updatedAt: new Date("2026-06-01T00:00:00Z"),
@@ -354,6 +369,48 @@ describe("processSyncItem — payment booking", () => {
 
     expect(paymentAccountMappingFindUniqueMock).not.toHaveBeenCalled();
     expect(bookInvoicePaymentMock).not.toHaveBeenCalled();
+  });
+
+  it("leaves the invoice as Draft and never attempts booking when the target status is Draft", async () => {
+    syncSettingsFindUniqueMock.mockResolvedValue({
+      shop: SHOP,
+      syncEnabled: true,
+      sevdeskContactPersonId: "999",
+      sevdeskTaxRuleId: "1",
+      sevdeskCategoryId: "3",
+      invoiceStatus: "100",
+      currency: "EUR",
+      defaultCheckAccountId: "99",
+      updatedAt: new Date("2026-06-01T00:00:00Z"),
+    });
+    graphqlMock.mockResolvedValueOnce(makeOrderResponse());
+    findInvoicesByOrderNameMock.mockResolvedValueOnce([]);
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(markInvoiceAsSentMock).not.toHaveBeenCalled();
+    expect(paymentAccountMappingFindUniqueMock).not.toHaveBeenCalled();
+    expect(bookInvoicePaymentMock).not.toHaveBeenCalled();
+  });
+
+  it("does not attempt booking when marking the invoice as sent fails", async () => {
+    graphqlMock.mockResolvedValueOnce(makeOrderResponse());
+    findInvoicesByOrderNameMock.mockResolvedValueOnce([]);
+    markInvoiceAsSentMock.mockRejectedValueOnce(new Error("SevDesk API down"));
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(bookInvoicePaymentMock).not.toHaveBeenCalled();
+    expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
+      where: { id: "item-1" },
+      data: {
+        status: "success",
+        sevdeskInvoiceId: "sd-invoice-1",
+        shopifyOrderName: "#1050",
+      },
+    });
   });
 
   it("skips booking when the order has multiple payment gateways", async () => {
@@ -451,7 +508,6 @@ describe("processSyncItem — credit note topics", () => {
       contactPersonId: "999",
       taxRuleId: "1",
       currency: "EUR",
-      status: "100",
     });
     expect(tagObjectMock).toHaveBeenCalledExactlyOnceWith(
       "sd-credit-1",

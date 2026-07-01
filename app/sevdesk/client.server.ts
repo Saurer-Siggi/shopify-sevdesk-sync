@@ -13,6 +13,9 @@ import type {
 const EMAIL_COMMUNICATION_TYPE = "EMAIL";
 // No cross-border sales yet (CLAUDE.md decision #3) — every order ships within Germany.
 const GERMANY_COUNTRY_ID = "1";
+// SevDesk: "Invalid status. New invoices must be created with status 100."
+// (confirmed live, same rule applies to CreditNote/Factory/saveCreditNote).
+const NEW_DOCUMENT_STATUS = "100";
 
 // Snapshot the order's address onto the invoice/credit-note directly, mirroring the
 // old official app, instead of relying on takeDefaultAddress copying the Contact's
@@ -122,7 +125,9 @@ export async function createInvoiceForOrder(
         contactPerson: { id: input.contactPersonId, objectName: "SevUser" },
         invoiceDate: formatDate(input.invoiceDate),
         deliveryDate: formatDate(input.deliverDate),
-        status: input.status,
+        // SevDesk rejects saveInvoice with anything but Draft — finalize via
+        // markInvoiceAsSent/bookInvoicePayment afterwards instead.
+        status: NEW_DOCUMENT_STATUS,
         invoiceType: "RE",
         currency: input.currency,
         taxRule: { id: input.taxRuleId, objectName: "TaxRule" },
@@ -180,7 +185,8 @@ export async function createCreditNoteForOrder(
         contact: { id: input.contactId, objectName: "Contact" },
         contactPerson: { id: input.contactPersonId, objectName: "SevUser" },
         creditNoteDate: formatDate(input.creditNoteDate),
-        status: input.status,
+        // Same Draft-only rule as saveInvoice applies to new credit notes.
+        status: NEW_DOCUMENT_STATUS,
         currency: input.currency,
         taxRule: { id: input.taxRuleId, objectName: "TaxRule" },
         taxRate: input.lineItems[0]?.taxRatePercent ?? 19,
@@ -293,6 +299,13 @@ interface RawCheckAccount {
 export async function listCheckAccounts(): Promise<SevDeskCheckAccount[]> {
   const accounts = await sevGet<RawCheckAccount>("/CheckAccount");
   return accounts.map((account) => ({ id: account.id, name: account.name }));
+}
+
+// Moves an invoice from Draft to Open — required before bookInvoicePayment
+// will accept it (SevDesk: "A draft can not be paid"). sendType "VPDF"
+// matches the old official app's invoices (marks it sent without emailing).
+export async function markInvoiceAsSent(invoiceId: string): Promise<void> {
+  await sevPut(`/Invoice/${invoiceId}/sendBy`, { sendType: "VPDF" });
 }
 
 export async function bookInvoicePayment(input: {
