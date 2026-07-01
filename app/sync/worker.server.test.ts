@@ -27,30 +27,42 @@ beforeEach(() => {
 });
 
 describe("processQueueOnce", () => {
-  it("returns 0 without querying items when sync settings are missing", async () => {
+  it("only processes manual (backfill) items when sync settings are missing", async () => {
     syncSettingsFindUniqueMock.mockResolvedValueOnce(null);
+    syncItemFindManyMock.mockResolvedValueOnce([]);
     const { processQueueOnce } = await import("./worker.server");
 
     const result = await processQueueOnce(SHOP);
 
     expect(result).toBe(0);
-    expect(syncItemFindManyMock).not.toHaveBeenCalled();
+    expect(syncItemFindManyMock).toHaveBeenCalledExactlyOnceWith({
+      where: { shop: SHOP, status: "pending", topic: "backfill" },
+      orderBy: { createdAt: "asc" },
+      take: 5,
+    });
   });
 
-  it("returns 0 when sync is disabled for the shop", async () => {
+  it("only processes manual (backfill) items when sync is disabled for the shop", async () => {
     syncSettingsFindUniqueMock.mockResolvedValueOnce({
       shop: SHOP,
       syncEnabled: false,
     });
+    const items = [{ id: "item-1", shop: SHOP, topic: "backfill" }];
+    syncItemFindManyMock.mockResolvedValueOnce(items);
     const { processQueueOnce } = await import("./worker.server");
 
     const result = await processQueueOnce(SHOP);
 
-    expect(result).toBe(0);
-    expect(syncItemFindManyMock).not.toHaveBeenCalled();
+    expect(syncItemFindManyMock).toHaveBeenCalledExactlyOnceWith({
+      where: { shop: SHOP, status: "pending", topic: "backfill" },
+      orderBy: { createdAt: "asc" },
+      take: 5,
+    });
+    expect(processSyncItemMock).toHaveBeenCalledTimes(1);
+    expect(result).toBe(1);
   });
 
-  it("processes up to `limit` pending items when sync is enabled", async () => {
+  it("processes up to `limit` pending items of any topic when sync is enabled", async () => {
     syncSettingsFindUniqueMock.mockResolvedValueOnce({
       shop: SHOP,
       syncEnabled: true,

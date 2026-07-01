@@ -8,10 +8,18 @@ export async function processQueueOnce(
   limit = 5,
 ): Promise<number> {
   const settings = await db.syncSettings.findUnique({ where: { shop } });
-  if (!settings?.syncEnabled) return 0;
+  const syncEnabled = settings?.syncEnabled ?? false;
 
+  // The live-sync toggle only gates webhook-driven auto-processing.
+  // Manually-triggered items (the order picker, date-range backfill — both
+  // enqueued under topic "backfill") always run: that's the point of a
+  // manual "sync now" action, independent of whether live sync is on.
   const items = await db.syncItem.findMany({
-    where: { shop, status: "pending" },
+    where: {
+      shop,
+      status: "pending",
+      ...(syncEnabled ? {} : { topic: "backfill" }),
+    },
     orderBy: { createdAt: "asc" },
     take: limit,
   });
@@ -38,10 +46,10 @@ async function tick(): Promise<void> {
   if (tickInProgress) return;
   tickInProgress = true;
   try {
-    const enabledShops = await db.syncSettings.findMany({
-      where: { syncEnabled: true },
-    });
-    for (const { shop } of enabledShops) {
+    // All known shops, not just sync-enabled ones — processQueueOnce itself
+    // decides what's eligible to run when sync is off (manual items only).
+    const shops = await db.syncSettings.findMany({ select: { shop: true } });
+    for (const { shop } of shops) {
       await processQueueOnce(shop);
     }
   } catch (error) {
