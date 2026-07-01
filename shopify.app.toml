@@ -44,5 +44,4 @@ api_version = "2026-07"
 redirect_urls = [ "https://sevsync.saurer-siggi.de/api/auth" ]
 
 [build]
-include_config_on_deploy = true
 automatically_update_urls_on_dev = true
