@@ -69,15 +69,15 @@ beforeEach(() => {
   sevGetMock.mockResolvedValue([]);
 });
 
-describe("triggerBackfill", () => {
-  it("enqueues SyncItem rows for orders with no existing coverage", async () => {
+describe("syncAllUnsynced", () => {
+  it("enqueues SyncItem rows for orders not already in SevDesk", async () => {
     graphqlMock.mockResolvedValueOnce(
       ordersPage([{ id: "gid://shopify/Order/1001", name: "#2001" }], false),
     );
     syncItemFindFirstMock.mockResolvedValueOnce(null);
-    const { triggerBackfill } = await import("./backfill.server");
+    const { syncAllUnsynced } = await import("./backfill.server");
 
-    const result = await triggerBackfill(SHOP, "2026-01-01", "2026-01-31");
+    const result = await syncAllUnsynced(SHOP);
 
     expect(syncItemCreateMock).toHaveBeenCalledExactlyOnceWith({
       data: {
@@ -90,36 +90,34 @@ describe("triggerBackfill", () => {
     expect(result).toEqual({ enqueued: 1, truncated: false });
   });
 
-  it("skips orders that already have a non-error SyncItem row", async () => {
+  it("skips orders already present in SevDesk", async () => {
     graphqlMock.mockResolvedValueOnce(
       ordersPage([{ id: "gid://shopify/Order/1002", name: "#2002" }], false),
+    );
+    sevGetMock.mockResolvedValueOnce([{ customerInternalNote: "#2002" }]);
+    const { syncAllUnsynced } = await import("./backfill.server");
+
+    const result = await syncAllUnsynced(SHOP);
+
+    expect(syncItemFindFirstMock).not.toHaveBeenCalled();
+    expect(syncItemCreateMock).not.toHaveBeenCalled();
+    expect(result).toEqual({ enqueued: 0, truncated: false });
+  });
+
+  it("skips orders that already have a non-error SyncItem row", async () => {
+    graphqlMock.mockResolvedValueOnce(
+      ordersPage([{ id: "gid://shopify/Order/1003", name: "#2003" }], false),
     );
     syncItemFindFirstMock.mockResolvedValueOnce({
       id: "existing-1",
       status: "success",
     });
-    const { triggerBackfill } = await import("./backfill.server");
+    const { syncAllUnsynced } = await import("./backfill.server");
 
-    const result = await triggerBackfill(SHOP, "2026-01-01", "2026-01-31");
+    const result = await syncAllUnsynced(SHOP);
 
     expect(syncItemCreateMock).not.toHaveBeenCalled();
     expect(result).toEqual({ enqueued: 0, truncated: false });
-  });
-
-  it("does enqueue when the only existing row for the order is an error", async () => {
-    graphqlMock.mockResolvedValueOnce(
-      ordersPage([{ id: "gid://shopify/Order/1003", name: "#2003" }], false),
-    );
-    syncItemFindFirstMock.mockResolvedValueOnce(null);
-    const { triggerBackfill } = await import("./backfill.server");
-
-    const result = await triggerBackfill(SHOP, "2026-01-01", "2026-01-31");
-
-    expect(syncItemFindFirstMock).toHaveBeenCalledExactlyOnceWith({
-      where: { shop: SHOP, shopifyOrderId: "1003", status: { not: "error" } },
-    });
-    expect(syncItemCreateMock).toHaveBeenCalledOnce();
-    expect(result).toEqual({ enqueued: 1, truncated: false });
   });
 
   it("pages through results until hasNextPage is false", async () => {
@@ -131,9 +129,9 @@ describe("triggerBackfill", () => {
         ordersPage([{ id: "gid://shopify/Order/2002", name: "#3002" }], false),
       );
     syncItemFindFirstMock.mockResolvedValue(null);
-    const { triggerBackfill } = await import("./backfill.server");
+    const { syncAllUnsynced } = await import("./backfill.server");
 
-    const result = await triggerBackfill(SHOP, "2026-01-01", "2026-02-28");
+    const result = await syncAllUnsynced(SHOP);
 
     expect(graphqlMock).toHaveBeenCalledTimes(2);
     const secondCallVariables = graphqlMock.mock.calls[1][1] as {
@@ -150,15 +148,52 @@ describe("triggerBackfill", () => {
       ),
     );
     syncItemFindFirstMock.mockResolvedValue(null);
-    const { triggerBackfill } = await import("./backfill.server");
+    const { syncAllUnsynced } = await import("./backfill.server");
 
-    const result = await triggerBackfill(SHOP, "2020-01-01", "2026-01-01");
+    const result = await syncAllUnsynced(SHOP);
 
     expect(result.truncated).toBe(true);
   });
 });
 
-describe("listRecentOrders", () => {
+describe("syncOrders", () => {
+  it("enqueues each given order and returns the count actually enqueued", async () => {
+    syncItemFindFirstMock.mockResolvedValue(null);
+    const { syncOrders } = await import("./backfill.server");
+
+    const result = await syncOrders(SHOP, [
+      { shopifyOrderId: "1001", shopifyOrderName: "#2001" },
+      { shopifyOrderId: "1002", shopifyOrderName: "#2002" },
+    ]);
+
+    expect(syncItemCreateMock).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({ enqueued: 2 });
+  });
+
+  it("skips orders that already have a non-error SyncItem row", async () => {
+    syncItemFindFirstMock
+      .mockResolvedValueOnce({ id: "existing-1", status: "success" })
+      .mockResolvedValueOnce(null);
+    const { syncOrders } = await import("./backfill.server");
+
+    const result = await syncOrders(SHOP, [
+      { shopifyOrderId: "1001", shopifyOrderName: "#2001" },
+      { shopifyOrderId: "1002", shopifyOrderName: "#2002" },
+    ]);
+
+    expect(syncItemCreateMock).toHaveBeenCalledExactlyOnceWith({
+      data: {
+        shop: SHOP,
+        shopifyOrderId: "1002",
+        shopifyOrderName: "#2002",
+        topic: "backfill",
+      },
+    });
+    expect(result).toEqual({ enqueued: 1 });
+  });
+});
+
+describe("listOrders", () => {
   const PAGE_INFO = {
     hasNextPage: true,
     hasPreviousPage: false,
@@ -190,12 +225,12 @@ describe("listRecentOrders", () => {
       { customerInternalNote: "#1001" },
       { customerInternalNote: null },
     ]);
-    const { listRecentOrders } = await import("./backfill.server");
+    const { listOrders } = await import("./backfill.server");
 
-    const result = await listRecentOrders(SHOP);
+    const result = await listOrders(SHOP);
 
     expect(graphqlMock).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining("RecentOrdersForward"),
+      expect.stringContaining("OrdersForward"),
       { variables: { first: 25, after: null } },
     );
     expect(result.orders).toEqual([
@@ -219,24 +254,24 @@ describe("listRecentOrders", () => {
 
   it("uses the backward query with last/before when a before cursor is given", async () => {
     graphqlMock.mockResolvedValueOnce(recentOrdersPage([], PAGE_INFO));
-    const { listRecentOrders } = await import("./backfill.server");
+    const { listOrders } = await import("./backfill.server");
 
-    await listRecentOrders(SHOP, { before: "cursor-abc", pageSize: 10 });
+    await listOrders(SHOP, { before: "cursor-abc", pageSize: 10 });
 
     expect(graphqlMock).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining("RecentOrdersBackward"),
+      expect.stringContaining("OrdersBackward"),
       { variables: { last: 10, before: "cursor-abc" } },
     );
   });
 
   it("uses the forward query with first/after when an after cursor is given", async () => {
     graphqlMock.mockResolvedValueOnce(recentOrdersPage([], PAGE_INFO));
-    const { listRecentOrders } = await import("./backfill.server");
+    const { listOrders } = await import("./backfill.server");
 
-    await listRecentOrders(SHOP, { after: "cursor-xyz" });
+    await listOrders(SHOP, { after: "cursor-xyz" });
 
     expect(graphqlMock).toHaveBeenCalledExactlyOnceWith(
-      expect.stringContaining("RecentOrdersForward"),
+      expect.stringContaining("OrdersForward"),
       { variables: { first: 25, after: "cursor-xyz" } },
     );
   });
@@ -262,9 +297,9 @@ describe("listRecentOrders", () => {
       ),
     );
     sevGetMock.mockResolvedValueOnce([]);
-    const { listRecentOrders } = await import("./backfill.server");
+    const { listOrders } = await import("./backfill.server");
 
-    await listRecentOrders(SHOP);
+    await listOrders(SHOP);
 
     expect(sevGetMock).toHaveBeenCalledTimes(1);
     expect(sevGetMock).toHaveBeenCalledWith(

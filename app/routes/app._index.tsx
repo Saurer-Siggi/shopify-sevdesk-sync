@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useMemo, useState, useEffect } from "react";
 import type {
   ActionFunctionArgs,
   HeadersFunction,
@@ -10,9 +10,9 @@ import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
 import {
-  listRecentOrders,
-  syncSingleOrder,
-  triggerBackfill,
+  listOrders,
+  syncAllUnsynced,
+  syncOrders,
 } from "../sync/backfill.server";
 
 const STATUSES = [
@@ -69,17 +69,17 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const url = new URL(request.url);
   const after = url.searchParams.get("after") ?? undefined;
   const before = url.searchParams.get("before") ?? undefined;
-  const recentOrdersPage = await listRecentOrders(shop, { after, before });
+  const ordersPage = await listOrders(shop, { after, before });
   const coverage = await db.syncItem.findMany({
     where: {
       shop,
       shopifyOrderId: {
-        in: recentOrdersPage.orders.map((o) => o.shopifyOrderId),
+        in: ordersPage.orders.map((o) => o.shopifyOrderId),
       },
     },
     orderBy: { updatedAt: "desc" },
   });
-  const orders = recentOrdersPage.orders.map((order) => ({
+  const orders = ordersPage.orders.map((order) => ({
     ...order,
     // Local queue status only — SevDesk's own dedup check (alreadyInSevDesk) is authoritative.
     syncStatus:
@@ -92,7 +92,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     items,
     statusCounts,
     orders,
-    pageInfo: recentOrdersPage.pageInfo,
+    pageInfo: ordersPage.pageInfo,
   };
 };
 
@@ -115,22 +115,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { intent, syncEnabled: updated.syncEnabled };
   }
 
-  if (intent === "backfill") {
-    const dateFrom = String(formData.get("dateFrom") ?? "");
-    const dateTo = String(formData.get("dateTo") ?? "");
-    const { enqueued, truncated } = await triggerBackfill(shop, dateFrom, dateTo);
+  if (intent === "sync-all-unsynced") {
+    const { enqueued, truncated } = await syncAllUnsynced(shop);
     return { intent, enqueued, truncated };
   }
 
-  if (intent === "sync-order") {
-    const shopifyOrderId = String(formData.get("shopifyOrderId") ?? "");
-    const shopifyOrderName = String(formData.get("shopifyOrderName") ?? "");
-    const { enqueued } = await syncSingleOrder(
-      shop,
-      shopifyOrderId,
-      shopifyOrderName,
-    );
-    return { intent, enqueued, shopifyOrderId };
+  if (intent === "sync-selected") {
+    const orders = JSON.parse(
+      String(formData.get("orders") ?? "[]"),
+    ) as Array<{ shopifyOrderId: string; shopifyOrderName: string }>;
+    const { enqueued } = await syncOrders(shop, orders);
+    return { intent, enqueued };
   }
 
   if (intent === "retry") {
@@ -145,6 +140,40 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   throw new Response("Unknown intent", { status: 400 });
 };
 
+type OrderRow = ReturnType<typeof useLoaderData<typeof loader>>["orders"][number];
+type SortColumn =
+  | "shopifyOrderName"
+  | "createdAt"
+  | "financialStatus"
+  | "alreadyInSevDesk"
+  | "syncStatus";
+type SortDirection = "asc" | "desc";
+
+const COLUMN_LABELS: Record<SortColumn, string> = {
+  shopifyOrderName: "Order",
+  createdAt: "Date",
+  financialStatus: "Financial status",
+  alreadyInSevDesk: "SevDesk status",
+  syncStatus: "Queue status",
+};
+
+function compareOrders(
+  a: OrderRow,
+  b: OrderRow,
+  column: SortColumn,
+  direction: SortDirection,
+): number {
+  const aValue = a[column];
+  const bValue = b[column];
+  let result: number;
+  if (typeof aValue === "boolean" || typeof bValue === "boolean") {
+    result = Number(aValue) - Number(bValue);
+  } else {
+    result = String(aValue ?? "").localeCompare(String(bValue ?? ""));
+  }
+  return direction === "asc" ? result : -result;
+}
+
 export default function Index() {
   const { syncEnabled, items, statusCounts, orders, pageInfo } =
     useLoaderData<typeof loader>();
@@ -152,12 +181,25 @@ export default function Index() {
   const navigate = useNavigate();
 
   const toggleFetcher = useFetcher<typeof action>();
-  const backfillFetcher = useFetcher<typeof action>();
+  const syncAllFetcher = useFetcher<typeof action>();
   const retryFetcher = useFetcher<typeof action>();
-  const syncOrderFetcher = useFetcher<typeof action>();
+  const syncSelectedFetcher = useFetcher<typeof action>();
 
   const isToggling = toggleFetcher.state !== "idle";
-  const isBackfilling = backfillFetcher.state !== "idle";
+  const isSyncingAll = syncAllFetcher.state !== "idle";
+  const isSyncingSelected = syncSelectedFetcher.state !== "idle";
+
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [sortColumn, setSortColumn] = useState<SortColumn>("createdAt");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+
+  const sortedOrders = useMemo(
+    () =>
+      [...orders].sort((a, b) =>
+        compareOrders(a, b, sortColumn, sortDirection),
+      ),
+    [orders, sortColumn, sortDirection],
+  );
 
   const optimisticSyncEnabled =
     toggleFetcher.formData?.get("intent") === "toggle"
@@ -165,16 +207,16 @@ export default function Index() {
       : syncEnabled;
 
   useEffect(() => {
-    if (backfillFetcher.data?.intent === "backfill") {
-      const { enqueued, truncated } = backfillFetcher.data;
+    if (syncAllFetcher.data?.intent === "sync-all-unsynced") {
+      const { enqueued, truncated } = syncAllFetcher.data;
       shopify.toast.show(
         truncated
-          ? `Backfill queued ${enqueued} order(s) but hit the page limit — date range may be incomplete, narrow it and re-run`
-          : `Backfill queued: ${enqueued} order(s) enqueued`,
+          ? `Synced ${enqueued} unsynced order(s) but hit the page limit — some older orders may not have been scanned`
+          : `Synced ${enqueued} unsynced order(s)`,
         truncated ? { isError: true } : undefined,
       );
     }
-  }, [backfillFetcher.data, shopify]);
+  }, [syncAllFetcher.data, shopify]);
 
   useEffect(() => {
     if (retryFetcher.data?.intent === "retry") {
@@ -185,42 +227,79 @@ export default function Index() {
   }, [retryFetcher.data, shopify]);
 
   useEffect(() => {
-    if (syncOrderFetcher.data?.intent === "sync-order") {
+    if (syncSelectedFetcher.data?.intent === "sync-selected") {
       shopify.toast.show(
-        syncOrderFetcher.data.enqueued
-          ? "Order queued for sync"
-          : "Already queued or synced — see status below",
+        `${syncSelectedFetcher.data.enqueued} order(s) queued for sync`,
       );
+      setSelectedIds([]);
     }
-  }, [syncOrderFetcher.data, shopify]);
+  }, [syncSelectedFetcher.data, shopify]);
 
   const toggleSync = () => {
     toggleFetcher.submit({ intent: "toggle" }, { method: "POST" });
   };
 
-  const syncOrder = (shopifyOrderId: string, shopifyOrderName: string) => {
-    syncOrderFetcher.submit(
-      { intent: "sync-order", shopifyOrderId, shopifyOrderName },
-      { method: "POST" },
-    );
+  const syncAllUnsyncedOrders = () => {
+    syncAllFetcher.submit({ intent: "sync-all-unsynced" }, { method: "POST" });
   };
 
-  const submitBackfill = (event: React.FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    form.set("intent", "backfill");
-    backfillFetcher.submit(form, { method: "POST" });
+  const syncSelectedOrders = () => {
+    const selected = sortedOrders
+      .filter((order) => selectedIds.includes(order.shopifyOrderId))
+      .map((order) => ({
+        shopifyOrderId: order.shopifyOrderId,
+        shopifyOrderName: order.shopifyOrderName,
+      }));
+    syncSelectedFetcher.submit(
+      { intent: "sync-selected", orders: JSON.stringify(selected) },
+      { method: "POST" },
+    );
   };
 
   const retryItem = (itemId: string) => {
     retryFetcher.submit({ intent: "retry", itemId }, { method: "POST" });
   };
 
+  const toggleSort = (column: SortColumn) => {
+    if (column === sortColumn) {
+      setSortDirection(sortDirection === "asc" ? "desc" : "asc");
+    } else {
+      setSortColumn(column);
+      setSortDirection("asc");
+    }
+  };
+
+  const columnHeader = (column: SortColumn) =>
+    `${COLUMN_LABELS[column]}${
+      sortColumn === column ? (sortDirection === "asc" ? " ▲" : " ▼") : ""
+    }`;
+
+  const toggleRowSelected = (shopifyOrderId: string) => {
+    setSelectedIds((current) =>
+      current.includes(shopifyOrderId)
+        ? current.filter((id) => id !== shopifyOrderId)
+        : [...current, shopifyOrderId],
+    );
+  };
+
+  const allOnPageSelected =
+    orders.length > 0 &&
+    orders.every((order) => selectedIds.includes(order.shopifyOrderId));
+  const someOnPageSelected = orders.some((order) =>
+    selectedIds.includes(order.shopifyOrderId),
+  );
+
+  const toggleSelectAllOnPage = () => {
+    setSelectedIds(allOnPageSelected ? [] : orders.map((o) => o.shopifyOrderId));
+  };
+
   const goToNextOrdersPage = () => {
+    setSelectedIds([]);
     if (pageInfo.endCursor) navigate(`?after=${pageInfo.endCursor}`);
   };
 
   const goToPreviousOrdersPage = () => {
+    setSelectedIds([]);
     if (pageInfo.startCursor) navigate(`?before=${pageInfo.startCursor}`);
   };
 
@@ -237,23 +316,74 @@ export default function Index() {
         </s-stack>
       </s-section>
 
-      <s-section heading="Recent Shopify orders">
-        <s-paragraph>
-          Pick a single order to sync now, independent of the live-sync
-          toggle above.
-        </s-paragraph>
+      <s-section heading="Orders">
+        <s-stack direction="inline" gap="base">
+          <s-button
+            variant="secondary"
+            {...(isSyncingAll ? { loading: true } : {})}
+            onClick={syncAllUnsyncedOrders}
+          >
+            Sync all unsynced orders
+          </s-button>
+        </s-stack>
         <s-table variant="auto">
+          {someOnPageSelected && (
+            <s-box slot="filters">
+              <s-stack direction="inline" gap="base">
+                <s-text>{selectedIds.length} selected</s-text>
+                <s-button
+                  variant="primary"
+                  {...(isSyncingSelected ? { loading: true } : {})}
+                  onClick={syncSelectedOrders}
+                >
+                  Sync selected
+                </s-button>
+              </s-stack>
+            </s-box>
+          )}
           <s-table-header-row>
-            <s-table-header>Order</s-table-header>
-            <s-table-header>Date</s-table-header>
-            <s-table-header>Financial status</s-table-header>
-            <s-table-header>SevDesk status</s-table-header>
-            <s-table-header>Queue status</s-table-header>
-            <s-table-header>Action</s-table-header>
+            <s-table-header>
+              <s-checkbox
+                checked={allOnPageSelected}
+                indeterminate={someOnPageSelected && !allOnPageSelected}
+                onChange={toggleSelectAllOnPage}
+              />
+            </s-table-header>
+            <s-table-header>
+              <s-clickable onClick={() => toggleSort("shopifyOrderName")}>
+                {columnHeader("shopifyOrderName")}
+              </s-clickable>
+            </s-table-header>
+            <s-table-header>
+              <s-clickable onClick={() => toggleSort("createdAt")}>
+                {columnHeader("createdAt")}
+              </s-clickable>
+            </s-table-header>
+            <s-table-header>
+              <s-clickable onClick={() => toggleSort("financialStatus")}>
+                {columnHeader("financialStatus")}
+              </s-clickable>
+            </s-table-header>
+            <s-table-header>
+              <s-clickable onClick={() => toggleSort("alreadyInSevDesk")}>
+                {columnHeader("alreadyInSevDesk")}
+              </s-clickable>
+            </s-table-header>
+            <s-table-header>
+              <s-clickable onClick={() => toggleSort("syncStatus")}>
+                {columnHeader("syncStatus")}
+              </s-clickable>
+            </s-table-header>
           </s-table-header-row>
           <s-table-body>
-            {orders.map((order) => (
+            {sortedOrders.map((order) => (
               <s-table-row key={order.shopifyOrderId}>
+                <s-table-cell>
+                  <s-checkbox
+                    checked={selectedIds.includes(order.shopifyOrderId)}
+                    onChange={() => toggleRowSelected(order.shopifyOrderId)}
+                  />
+                </s-table-cell>
                 <s-table-cell>{order.shopifyOrderName}</s-table-cell>
                 <s-table-cell>
                   {new Date(order.createdAt).toLocaleDateString()}
@@ -280,25 +410,6 @@ export default function Index() {
                     "not queued"
                   )}
                 </s-table-cell>
-                <s-table-cell>
-                  {order.alreadyInSevDesk ? (
-                    <s-text color="subdued">Already in SevDesk</s-text>
-                  ) : (
-                    <s-button
-                      variant="tertiary"
-                      {...(syncOrderFetcher.state !== "idle" &&
-                      syncOrderFetcher.formData?.get("shopifyOrderId") ===
-                        order.shopifyOrderId
-                        ? { loading: true }
-                        : {})}
-                      onClick={() =>
-                        syncOrder(order.shopifyOrderId, order.shopifyOrderName)
-                      }
-                    >
-                      Sync this order
-                    </s-button>
-                  )}
-                </s-table-cell>
               </s-table-row>
             ))}
           </s-table-body>
@@ -319,21 +430,6 @@ export default function Index() {
             Next
           </s-button>
         </s-stack>
-      </s-section>
-
-      <s-section heading="Historical backfill">
-        <form onSubmit={submitBackfill}>
-          <s-stack direction="inline" gap="base">
-            <input type="date" name="dateFrom" required />
-            <input type="date" name="dateTo" required />
-            <s-button
-              type="submit"
-              {...(isBackfilling ? { loading: true } : {})}
-            >
-              Trigger backfill
-            </s-button>
-          </s-stack>
-        </form>
       </s-section>
 
       <s-section heading="Status">

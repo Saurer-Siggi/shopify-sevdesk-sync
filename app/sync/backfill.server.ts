@@ -4,12 +4,12 @@ import { sevGet } from "../sevdesk/http.server";
 
 const PAGE_SIZE = 100;
 const MAX_PAGES = 50;
-const DEFAULT_RECENT_ORDERS_PAGE_SIZE = 25;
+const DEFAULT_ORDERS_PAGE_SIZE = 25;
 const INVOICED_ORDER_NAMES_LIMIT = 500;
 
-const ORDERS_FOR_BACKFILL_QUERY = `#graphql
-  query OrdersForBackfill($first: Int!, $after: String, $query: String) {
-    orders(first: $first, after: $after, query: $query, sortKey: CREATED_AT) {
+const ORDERS_FOR_SYNC_ALL_QUERY = `#graphql
+  query OrdersForSyncAll($first: Int!, $after: String) {
+    orders(first: $first, after: $after, sortKey: CREATED_AT) {
       edges {
         cursor
         node {
@@ -24,7 +24,7 @@ const ORDERS_FOR_BACKFILL_QUERY = `#graphql
   }
 `;
 
-interface OrdersForBackfillResponse {
+interface OrdersForSyncAllResponse {
   data: {
     orders: {
       edges: Array<{ cursor: string; node: { id: string; name: string } }>;
@@ -54,132 +54,6 @@ async function enqueueBackfillItem(
   return true;
 }
 
-export async function triggerBackfill(
-  shop: string,
-  dateFrom: string,
-  dateTo: string,
-): Promise<{ enqueued: number; truncated: boolean }> {
-  const { admin } = await unauthenticated.admin(shop);
-  const searchQuery = `created_at:>=${dateFrom} AND created_at:<=${dateTo}`;
-
-  let enqueued = 0;
-  let after: string | null = null;
-  let truncated = false;
-
-  for (let page = 0; page < MAX_PAGES; page++) {
-    const response = await admin.graphql(ORDERS_FOR_BACKFILL_QUERY, {
-      variables: { first: PAGE_SIZE, after, query: searchQuery },
-    });
-    const { data } = (await response.json()) as OrdersForBackfillResponse;
-
-    for (const { node } of data.orders.edges) {
-      const didEnqueue = await enqueueBackfillItem(
-        shop,
-        toBareOrderId(node.id),
-        node.name,
-      );
-      if (didEnqueue) enqueued++;
-    }
-
-    if (!data.orders.pageInfo.hasNextPage) break;
-    const lastEdge = data.orders.edges[data.orders.edges.length - 1];
-    if (!lastEdge) break;
-    after = lastEdge.cursor;
-
-    if (page === MAX_PAGES - 1) truncated = true;
-  }
-
-  return { enqueued, truncated };
-}
-
-export async function syncSingleOrder(
-  shop: string,
-  shopifyOrderId: string,
-  shopifyOrderName: string,
-): Promise<{ enqueued: boolean }> {
-  const enqueued = await enqueueBackfillItem(
-    shop,
-    shopifyOrderId,
-    shopifyOrderName,
-  );
-  return { enqueued };
-}
-
-const RECENT_ORDERS_FORWARD_QUERY = `#graphql
-  query RecentOrdersForward($first: Int!, $after: String) {
-    orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) {
-      nodes {
-        id
-        name
-        createdAt
-        displayFinancialStatus
-      }
-      pageInfo {
-        hasNextPage
-        hasPreviousPage
-        startCursor
-        endCursor
-      }
-    }
-  }
-`;
-
-const RECENT_ORDERS_BACKWARD_QUERY = `#graphql
-  query RecentOrdersBackward($last: Int!, $before: String) {
-    orders(last: $last, before: $before, sortKey: CREATED_AT, reverse: true) {
-      nodes {
-        id
-        name
-        createdAt
-        displayFinancialStatus
-      }
-      pageInfo {
-        hasNextPage
-        hasPreviousPage
-        startCursor
-        endCursor
-      }
-    }
-  }
-`;
-
-interface RecentOrdersResponse {
-  data: {
-    orders: {
-      nodes: Array<{
-        id: string;
-        name: string;
-        createdAt: string;
-        displayFinancialStatus: string | null;
-      }>;
-      pageInfo: {
-        hasNextPage: boolean;
-        hasPreviousPage: boolean;
-        startCursor: string | null;
-        endCursor: string | null;
-      };
-    };
-  };
-}
-
-export interface RecentOrder {
-  shopifyOrderId: string;
-  shopifyOrderName: string;
-  createdAt: string;
-  financialStatus: string | null;
-  alreadyInSevDesk: boolean;
-}
-
-export interface RecentOrdersPage {
-  orders: RecentOrder[];
-  pageInfo: {
-    hasNextPage: boolean;
-    hasPreviousPage: boolean;
-    startCursor: string | null;
-    endCursor: string | null;
-  };
-}
-
 interface RawInvoiceNote {
   customerInternalNote?: string | null;
 }
@@ -200,24 +74,152 @@ async function fetchInvoicedOrderNames(
   return names;
 }
 
-export async function listRecentOrders(
+export async function syncAllUnsynced(
+  shop: string,
+): Promise<{ enqueued: number; truncated: boolean }> {
+  const { admin } = await unauthenticated.admin(shop);
+  const invoicedNames = await fetchInvoicedOrderNames();
+
+  let enqueued = 0;
+  let after: string | null = null;
+  let truncated = false;
+
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const response = await admin.graphql(ORDERS_FOR_SYNC_ALL_QUERY, {
+      variables: { first: PAGE_SIZE, after },
+    });
+    const { data } = (await response.json()) as OrdersForSyncAllResponse;
+
+    for (const { node } of data.orders.edges) {
+      if (invoicedNames.has(node.name)) continue;
+      const didEnqueue = await enqueueBackfillItem(
+        shop,
+        toBareOrderId(node.id),
+        node.name,
+      );
+      if (didEnqueue) enqueued++;
+    }
+
+    if (!data.orders.pageInfo.hasNextPage) break;
+    const lastEdge = data.orders.edges[data.orders.edges.length - 1];
+    if (!lastEdge) break;
+    after = lastEdge.cursor;
+
+    if (page === MAX_PAGES - 1) truncated = true;
+  }
+
+  return { enqueued, truncated };
+}
+
+export async function syncOrders(
+  shop: string,
+  orders: Array<{ shopifyOrderId: string; shopifyOrderName: string }>,
+): Promise<{ enqueued: number }> {
+  let enqueued = 0;
+  for (const { shopifyOrderId, shopifyOrderName } of orders) {
+    const didEnqueue = await enqueueBackfillItem(
+      shop,
+      shopifyOrderId,
+      shopifyOrderName,
+    );
+    if (didEnqueue) enqueued++;
+  }
+  return { enqueued };
+}
+
+const ORDERS_FORWARD_QUERY = `#graphql
+  query OrdersForward($first: Int!, $after: String) {
+    orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) {
+      nodes {
+        id
+        name
+        createdAt
+        displayFinancialStatus
+      }
+      pageInfo {
+        hasNextPage
+        hasPreviousPage
+        startCursor
+        endCursor
+      }
+    }
+  }
+`;
+
+const ORDERS_BACKWARD_QUERY = `#graphql
+  query OrdersBackward($last: Int!, $before: String) {
+    orders(last: $last, before: $before, sortKey: CREATED_AT, reverse: true) {
+      nodes {
+        id
+        name
+        createdAt
+        displayFinancialStatus
+      }
+      pageInfo {
+        hasNextPage
+        hasPreviousPage
+        startCursor
+        endCursor
+      }
+    }
+  }
+`;
+
+interface OrdersPageResponse {
+  data: {
+    orders: {
+      nodes: Array<{
+        id: string;
+        name: string;
+        createdAt: string;
+        displayFinancialStatus: string | null;
+      }>;
+      pageInfo: {
+        hasNextPage: boolean;
+        hasPreviousPage: boolean;
+        startCursor: string | null;
+        endCursor: string | null;
+      };
+    };
+  };
+}
+
+export interface ShopifyOrder {
+  shopifyOrderId: string;
+  shopifyOrderName: string;
+  createdAt: string;
+  financialStatus: string | null;
+  alreadyInSevDesk: boolean;
+}
+
+export interface OrdersPage {
+  orders: ShopifyOrder[];
+  pageInfo: {
+    hasNextPage: boolean;
+    hasPreviousPage: boolean;
+    startCursor: string | null;
+    endCursor: string | null;
+  };
+}
+
+export async function listOrders(
   shop: string,
   options?: { after?: string; before?: string; pageSize?: number },
-): Promise<RecentOrdersPage> {
-  const pageSize = options?.pageSize ?? DEFAULT_RECENT_ORDERS_PAGE_SIZE;
+): Promise<OrdersPage> {
+  const pageSize = options?.pageSize ?? DEFAULT_ORDERS_PAGE_SIZE;
   const { admin } = await unauthenticated.admin(shop);
 
   const [response, invoicedNames] = await Promise.all([
     options?.before
-      ? admin.graphql(RECENT_ORDERS_BACKWARD_QUERY, {
+      ? admin.graphql(ORDERS_BACKWARD_QUERY, {
           variables: { last: pageSize, before: options.before },
         })
-      : admin.graphql(RECENT_ORDERS_FORWARD_QUERY, {
+      : admin.graphql(ORDERS_FORWARD_QUERY, {
           variables: { first: pageSize, after: options?.after ?? null },
         }),
     fetchInvoicedOrderNames(),
   ]);
-  const { data } = (await response.json()) as RecentOrdersResponse;
+  const { data } = (await response.json()) as OrdersPageResponse;
 
   return {
     orders: data.orders.nodes.map((node) => ({

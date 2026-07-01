@@ -21,13 +21,13 @@ vi.mock("../../db.server", () => ({
   },
 }));
 
-const triggerBackfillMock = vi.fn();
-const syncSingleOrderMock = vi.fn();
-const listRecentOrdersMock = vi.fn();
+const syncAllUnsyncedMock = vi.fn();
+const syncOrdersMock = vi.fn();
+const listOrdersMock = vi.fn();
 vi.mock("../../sync/backfill.server", () => ({
-  triggerBackfill: triggerBackfillMock,
-  syncSingleOrder: syncSingleOrderMock,
-  listRecentOrders: listRecentOrdersMock,
+  syncAllUnsynced: syncAllUnsyncedMock,
+  syncOrders: syncOrdersMock,
+  listOrders: listOrdersMock,
 }));
 
 const SHOP = "example.myshopify.com";
@@ -66,20 +66,18 @@ describe("app._index action", () => {
     expect(result).toEqual({ intent: "toggle", syncEnabled: true });
   });
 
-  it("backfill calls triggerBackfill with shop and date range", async () => {
-    triggerBackfillMock.mockResolvedValue({ enqueued: 7 });
+  it("sync-all-unsynced calls syncAllUnsynced with shop", async () => {
+    syncAllUnsyncedMock.mockResolvedValue({ enqueued: 7, truncated: false });
     const { action } = await import("../app._index");
 
-    const result = await action(
-      makeArgs({ intent: "backfill", dateFrom: "2026-01-01", dateTo: "2026-01-31" }),
-    );
+    const result = await action(makeArgs({ intent: "sync-all-unsynced" }));
 
-    expect(triggerBackfillMock).toHaveBeenCalledExactlyOnceWith(
-      SHOP,
-      "2026-01-01",
-      "2026-01-31",
-    );
-    expect(result).toEqual({ intent: "backfill", enqueued: 7 });
+    expect(syncAllUnsyncedMock).toHaveBeenCalledExactlyOnceWith(SHOP);
+    expect(result).toEqual({
+      intent: "sync-all-unsynced",
+      enqueued: 7,
+      truncated: false,
+    });
   });
 
   it("retry only touches SyncItem rows matching the current shop", async () => {
@@ -108,27 +106,19 @@ describe("app._index action", () => {
     expect(result).toEqual({ intent: "retry", retried: false });
   });
 
-  it("sync-order enqueues a single picked order", async () => {
-    syncSingleOrderMock.mockResolvedValue({ enqueued: true });
+  it("sync-selected enqueues the given orders", async () => {
+    syncOrdersMock.mockResolvedValue({ enqueued: 2 });
     const { action } = await import("../app._index");
 
+    const orders = [
+      { shopifyOrderId: "123", shopifyOrderName: "#1050" },
+      { shopifyOrderId: "124", shopifyOrderName: "#1051" },
+    ];
     const result = await action(
-      makeArgs({
-        intent: "sync-order",
-        shopifyOrderId: "123",
-        shopifyOrderName: "#1050",
-      }),
+      makeArgs({ intent: "sync-selected", orders: JSON.stringify(orders) }),
     );
 
-    expect(syncSingleOrderMock).toHaveBeenCalledExactlyOnceWith(
-      SHOP,
-      "123",
-      "#1050",
-    );
-    expect(result).toEqual({
-      intent: "sync-order",
-      enqueued: true,
-      shopifyOrderId: "123",
-    });
+    expect(syncOrdersMock).toHaveBeenCalledExactlyOnceWith(SHOP, orders);
+    expect(result).toEqual({ intent: "sync-selected", enqueued: 2 });
   });
 });
