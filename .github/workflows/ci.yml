@@ -20,7 +20,10 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20.19"
+          # Runtime image stays on node:20-alpine (Dockerfile installs with
+          # --omit=dev, so devDependency engine requirements never apply there).
+          # CI installs devDependencies too and @shopify/polaris-types requires >=22.18.
+          node-version: "22.18"
           cache: npm
 
       - name: Install dependencies
