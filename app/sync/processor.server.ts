@@ -8,7 +8,7 @@ import {
   tagObject,
   upsertContactByEmail,
 } from "../sevdesk/client.server";
-import type { ContactInput, OrderLineItem } from "../sevdesk/types";
+import type { ContactInput, OrderAddress, OrderLineItem } from "../sevdesk/types";
 
 const ORDER_FOR_SYNC_QUERY = `#graphql
   query OrderForSync($id: ID!) {
@@ -24,6 +24,18 @@ const ORDER_FOR_SYNC_QUERY = `#graphql
         defaultEmailAddress {
           emailAddress
         }
+      }
+      shippingAddress {
+        name
+        address1
+        zip
+        city
+      }
+      billingAddress {
+        name
+        address1
+        zip
+        city
       }
       lineItems(first: 250) {
         nodes {
@@ -43,6 +55,13 @@ const ORDER_FOR_SYNC_QUERY = `#graphql
   }
 `;
 
+interface RawShopifyAddress {
+  name: string | null;
+  address1: string | null;
+  zip: string | null;
+  city: string | null;
+}
+
 interface OrderForSyncResponse {
   data: {
     order: {
@@ -56,6 +75,8 @@ interface OrderForSyncResponse {
         displayName: string;
         defaultEmailAddress: { emailAddress: string } | null;
       } | null;
+      shippingAddress: RawShopifyAddress | null;
+      billingAddress: RawShopifyAddress | null;
       lineItems: {
         nodes: Array<{
           title: string;
@@ -120,6 +141,21 @@ function resolveEmail(order: OrderForSyncResponse["data"]["order"]): string {
     throw new Error(`Order ${order?.name ?? "unknown"} has no usable email`);
   }
   return email;
+}
+
+function resolveAddress(
+  order: NonNullable<OrderForSyncResponse["data"]["order"]>,
+): OrderAddress {
+  const raw = order.shippingAddress ?? order.billingAddress;
+  if (!raw?.address1 || !raw.zip || !raw.city) {
+    throw new Error(`Order ${order.name} has no usable address`);
+  }
+  return {
+    name: raw.name ?? order.customer?.displayName ?? "",
+    street: raw.address1,
+    zip: raw.zip,
+    city: raw.city,
+  };
 }
 
 function buildContactInput(
@@ -253,6 +289,7 @@ async function handleInvoiceTopic(
     contactId: contact.id,
     invoiceDate: new Date(),
     lineItems: buildLineItems(order),
+    address: resolveAddress(order),
     contactPersonId: settings.sevdeskContactPersonId,
     taxRuleId: settings.sevdeskTaxRuleId,
     currency: settings.currency,
@@ -307,6 +344,7 @@ async function handleCreditNoteTopic(
     relatedInvoiceId: matches[0].id,
     creditNoteDate: new Date(),
     lineItems: buildLineItems(order),
+    address: resolveAddress(order),
     contactPersonId: settings.sevdeskContactPersonId,
     taxRuleId: settings.sevdeskTaxRuleId,
     currency: settings.currency,

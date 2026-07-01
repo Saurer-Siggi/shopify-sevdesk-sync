@@ -100,6 +100,13 @@ vi.mock("../../shopify.server", () => ({
                   displayName: "Erika Musterfrau",
                   defaultEmailAddress: { emailAddress: "customer@example.invalid" },
                 },
+                shippingAddress: {
+                  name: "Erika Musterfrau",
+                  address1: "Musterstraße 1",
+                  zip: "10115",
+                  city: "Berlin",
+                },
+                billingAddress: null,
                 lineItems: {
                   nodes: [
                     {

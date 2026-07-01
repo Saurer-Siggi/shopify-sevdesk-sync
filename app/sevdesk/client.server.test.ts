@@ -193,6 +193,7 @@ describe("createInvoiceForOrder", () => {
         { name: "Kräuterlikör 0,7l", quantity: 2, unitPriceGross: 19.99, taxRatePercent: 19 },
         { name: "Bio-Apfelsaft 1l", quantity: 1, unitPriceGross: 3.49, taxRatePercent: 7 },
       ],
+      address: { name: "Test Kundin", street: "Teststraße 1", zip: "12345", city: "Teststadt" },
       contactPersonId: "999",
       taxRuleId: "1",
       currency: "EUR",
@@ -209,6 +210,15 @@ describe("createInvoiceForOrder", () => {
     expect(body.invoice.taxRule).toEqual({ id: "1", objectName: "TaxRule" });
     // SevDesk rejects invoice creation with a DB-level error if this header field is missing.
     expect(body.invoice.taxRate).toBe(19);
+    expect(body.invoice.addressName).toBe("Test Kundin");
+    expect(body.invoice.addressStreet).toBe("Teststraße 1");
+    expect(body.invoice.addressZip).toBe("12345");
+    expect(body.invoice.addressCity).toBe("Teststadt");
+    expect(body.invoice.addressCountry).toEqual({ id: "1", objectName: "StaticCountry" });
+    expect(body.takeDefaultAddress).toBe(false);
+    expect(body.invoice.header).toBe("Rechnung zur Bestellung #1050");
+    expect(body.invoice.headText).toContain("vielen Dank für Ihre Bestellung");
+    expect(body.invoice.footText).toContain("[%PAYPAL%]");
     expect(body.invoice.contact).toEqual({ id: "501", objectName: "Contact" });
     expect(body.invoice.contactPerson).toEqual({ id: "999", objectName: "SevUser" });
     expect(body.invoice.currency).toBe("EUR");
@@ -242,6 +252,7 @@ describe("createInvoiceForOrder", () => {
       lineItems: [
         { name: "Kräuterlikör 0,7l", quantity: 1, unitPriceGross: 19.99, taxRatePercent: 19 },
       ],
+      address: { name: "Test Kundin", street: "Teststraße 1", zip: "12345", city: "Teststadt" },
       contactPersonId: "999",
       taxRuleId: "1",
       currency: "EUR",
@@ -268,6 +279,7 @@ describe("createCreditNoteForOrder", () => {
       lineItems: [
         { name: "Kräuterlikör 0,7l", quantity: 1, unitPriceGross: 19.99, taxRatePercent: 19 },
       ],
+      address: { name: "Test Kundin", street: "Teststraße 1", zip: "12345", city: "Teststadt" },
       contactPersonId: "999",
       taxRuleId: "1",
       currency: "EUR",
@@ -282,6 +294,8 @@ describe("createCreditNoteForOrder", () => {
 
     expect(body.creditNote.customerInternalNote).toBe("#1050");
     expect(body.creditNote.taxRate).toBe(19);
+    expect(body.creditNote.addressName).toBe("Test Kundin");
+    expect(body.takeDefaultAddress).toBe(false);
     expect(body.creditNote.refSrcInvoice).toEqual({
       id: "1001",
       objectName: "Invoice",

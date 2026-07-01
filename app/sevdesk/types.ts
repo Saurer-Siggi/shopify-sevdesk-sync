@@ -26,11 +26,19 @@ export interface OrderLineItem {
   taxRatePercent: number;
 }
 
+export interface OrderAddress {
+  name: string;
+  street: string;
+  zip: string;
+  city: string;
+}
+
 export interface CreateInvoiceInput {
   orderName: string;
   contactId: string;
   invoiceDate: Date;
   lineItems: OrderLineItem[];
+  address: OrderAddress;
   contactPersonId: string;
   taxRuleId: string;
   currency: string;
@@ -43,6 +51,7 @@ export interface CreateCreditNoteInput {
   relatedInvoiceId: string;
   creditNoteDate: Date;
   lineItems: OrderLineItem[];
+  address: OrderAddress;
   contactPersonId: string;
   taxRuleId: string;
   currency: string;

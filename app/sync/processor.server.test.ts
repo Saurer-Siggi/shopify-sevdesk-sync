@@ -58,6 +58,13 @@ function makeOrderResponse(overrides: {
                 ? { emailAddress: overrides.customerEmail }
                 : null,
         },
+        shippingAddress: {
+          name: "Test Kundin",
+          address1: "Teststraße 1",
+          zip: "12345",
+          city: "Teststadt",
+        },
+        billingAddress: null,
         lineItems: {
           nodes: [
             {
@@ -157,6 +164,12 @@ describe("processSyncItem — invoice topics", () => {
           taxRatePercent: 19,
         },
       ],
+      address: {
+        name: "Test Kundin",
+        street: "Teststraße 1",
+        zip: "12345",
+        city: "Teststadt",
+      },
       contactPersonId: "999",
       taxRuleId: "1",
       currency: "EUR",
@@ -228,6 +241,12 @@ describe("processSyncItem — credit note topics", () => {
           taxRatePercent: 19,
         },
       ],
+      address: {
+        name: "Test Kundin",
+        street: "Teststraße 1",
+        zip: "12345",
+        city: "Teststadt",
+      },
       contactPersonId: "999",
       taxRuleId: "1",
       currency: "EUR",
@@ -324,6 +343,55 @@ describe("processSyncItem — error handling", () => {
         attempts: { increment: 1 },
         status: "error",
         lastError: "SevDesk API returned 500",
+        shopifyOrderName: "#1050",
+      },
+    });
+  });
+
+  it("fails with a clear error when the order has no usable address", async () => {
+    graphqlMock.mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          order: {
+            id: "gid://shopify/Order/1050",
+            name: "#1050",
+            email: null,
+            customer: {
+              id: "gid://shopify/Customer/1",
+              firstName: "Max",
+              lastName: "Mustermann",
+              displayName: "Max Mustermann",
+              defaultEmailAddress: { emailAddress: "test@example.invalid" },
+            },
+            shippingAddress: null,
+            billingAddress: null,
+            lineItems: {
+              nodes: [
+                {
+                  title: "Sauerkirsch Likör 0.5l",
+                  quantity: 2,
+                  originalUnitPriceSet: { shopMoney: { amount: "12.50" } },
+                  taxLines: [{ ratePercentage: 19 }],
+                },
+              ],
+            },
+          },
+        },
+      }),
+    );
+    findInvoicesByOrderNameMock.mockResolvedValueOnce([]);
+    upsertContactByEmailMock.mockResolvedValueOnce({ id: "contact-1" });
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(createInvoiceForOrderMock).not.toHaveBeenCalled();
+    expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
+      where: { id: "item-1" },
+      data: {
+        attempts: { increment: 1 },
+        status: "error",
+        lastError: "Order #1050 has no usable address",
         shopifyOrderName: "#1050",
       },
     });

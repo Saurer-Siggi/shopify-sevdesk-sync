@@ -3,6 +3,7 @@ import type {
   ContactInput,
   CreateCreditNoteInput,
   CreateInvoiceInput,
+  OrderAddress,
   OrderLineItem,
   SevDeskContactRef,
   SevDeskCreditNoteRef,
@@ -10,6 +11,21 @@ import type {
 } from "./types";
 
 const EMAIL_COMMUNICATION_TYPE = "EMAIL";
+// No cross-border sales yet (CLAUDE.md decision #3) — every order ships within Germany.
+const GERMANY_COUNTRY_ID = "1";
+
+// Snapshot the order's address onto the invoice/credit-note directly, mirroring the
+// old official app, instead of relying on takeDefaultAddress copying the Contact's
+// address (which we never set, so it silently produced blank structured address fields).
+function buildAddressFields(address: OrderAddress) {
+  return {
+    addressName: address.name,
+    addressStreet: address.street,
+    addressZip: address.zip,
+    addressCity: address.city,
+    addressCountry: { id: GERMANY_COUNTRY_ID, objectName: "StaticCountry" },
+  };
+}
 
 interface RawInvoice {
   id: string;
@@ -88,6 +104,13 @@ interface RawInvoiceFactoryResponse {
   objects: { invoice: RawInvoice };
 }
 
+// Mirrors the old official app's invoice text verbatim (confirmed against a
+// live invoice) so customer-facing PDFs stay consistent across the switch.
+const INVOICE_HEAD_TEXT =
+  "Sehr geehrte Damen und Herren,<br/><br/>vielen Dank für Ihre Bestellung und das damit verbundene Vertrauen!<br/>Hiermit stellen wir Ihnen die folgenden Lieferungen in Rechnung:";
+const INVOICE_FOOT_TEXT =
+  "<p>[%PAYPAL%]</p>Sofern Sie noch keine Zahlung vorgenommen haben, überweisen Sie den Rechnungsbetrag bitte (unter Angabe der Rechnungsnummer) auf die unten angegebene Bankverbindung.";
+
 export async function createInvoiceForOrder(
   input: CreateInvoiceInput,
 ): Promise<SevDeskInvoiceRef> {
@@ -106,6 +129,10 @@ export async function createInvoiceForOrder(
         // their own; use the first line item's rate as the representative one.
         taxRate: input.lineItems[0]?.taxRatePercent ?? 19,
         customerInternalNote: input.orderName,
+        ...buildAddressFields(input.address),
+        header: `Rechnung zur Bestellung ${input.orderName}`,
+        headText: INVOICE_HEAD_TEXT,
+        footText: INVOICE_FOOT_TEXT,
         objectName: "Invoice",
         mapAll: true,
       },
@@ -113,7 +140,7 @@ export async function createInvoiceForOrder(
       invoicePosDelete: null,
       discountSave: null,
       discountDelete: null,
-      takeDefaultAddress: true,
+      takeDefaultAddress: false,
     },
   );
   return {
@@ -157,6 +184,7 @@ export async function createCreditNoteForOrder(
         taxRule: { id: input.taxRuleId, objectName: "TaxRule" },
         taxRate: input.lineItems[0]?.taxRatePercent ?? 19,
         customerInternalNote: input.orderName,
+        ...buildAddressFields(input.address),
         refSrcInvoice: { id: input.relatedInvoiceId, objectName: "Invoice" },
         bookingCategory: "UNDERACHIEVEMENT",
         objectName: "CreditNote",
@@ -174,7 +202,7 @@ export async function createCreditNoteForOrder(
       creditNotePosDelete: null,
       discountSave: null,
       discountDelete: null,
-      takeDefaultAddress: true,
+      takeDefaultAddress: false,
       forCashRegister: false,
     },
   );
