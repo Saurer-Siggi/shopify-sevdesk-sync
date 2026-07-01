@@ -198,6 +198,8 @@ describe("createInvoiceForOrder", () => {
 
     expect(body.invoice.customerInternalNote).toBe("#1050");
     expect(body.invoice.taxRule).toEqual({ id: "1", objectName: "TaxRule" });
+    // SevDesk rejects invoice creation with a DB-level error if this header field is missing.
+    expect(body.invoice.taxRate).toBe(19);
     expect(body.invoice.contact).toEqual({ id: "501", objectName: "Contact" });
     expect(body.invoicePosSave).toHaveLength(2);
     expect(body.invoicePosSave[0]).toMatchObject({
@@ -259,6 +261,7 @@ describe("createCreditNoteForOrder", () => {
     const body = JSON.parse(init.body as string);
 
     expect(body.creditNote.customerInternalNote).toBe("#1050");
+    expect(body.creditNote.taxRate).toBe(19);
     expect(body.creditNote.refSrcInvoice).toEqual({
       id: "1001",
       objectName: "Invoice",

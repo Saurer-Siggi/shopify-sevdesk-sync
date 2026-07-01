@@ -106,6 +106,9 @@ export async function createInvoiceForOrder(
         invoiceType: "RE",
         currency: CURRENCY,
         taxRule: { id: STANDARD_TAX_RULE_ID, objectName: "TaxRule" },
+        // SevDesk requires a header-level taxRate even though positions carry
+        // their own; use the first line item's rate as the representative one.
+        taxRate: input.lineItems[0]?.taxRatePercent ?? 19,
         customerInternalNote: input.orderName,
         objectName: "Invoice",
         mapAll: true,
@@ -156,6 +159,7 @@ export async function createCreditNoteForOrder(
         status: INVOICE_STATUS_DRAFT,
         currency: CURRENCY,
         taxRule: { id: STANDARD_TAX_RULE_ID, objectName: "TaxRule" },
+        taxRate: input.lineItems[0]?.taxRatePercent ?? 19,
         customerInternalNote: input.orderName,
         refSrcInvoice: { id: input.relatedInvoiceId, objectName: "Invoice" },
         bookingCategory: "UNDERACHIEVEMENT",
