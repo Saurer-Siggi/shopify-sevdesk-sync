@@ -4,7 +4,7 @@ import type {
   HeadersFunction,
   LoaderFunctionArgs,
 } from "react-router";
-import { useFetcher, useLoaderData } from "react-router";
+import { useFetcher, useLoaderData, useNavigate } from "react-router";
 import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
@@ -66,17 +66,22 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return acc;
   }, {} as StatusCounts);
 
-  const recentOrders = await listRecentOrders(shop);
+  const url = new URL(request.url);
+  const after = url.searchParams.get("after") ?? undefined;
+  const before = url.searchParams.get("before") ?? undefined;
+  const recentOrdersPage = await listRecentOrders(shop, { after, before });
   const coverage = await db.syncItem.findMany({
     where: {
       shop,
-      shopifyOrderId: { in: recentOrders.map((o) => o.shopifyOrderId) },
+      shopifyOrderId: {
+        in: recentOrdersPage.orders.map((o) => o.shopifyOrderId),
+      },
     },
     orderBy: { updatedAt: "desc" },
   });
-  const orders = recentOrders.map((order) => ({
+  const orders = recentOrdersPage.orders.map((order) => ({
     ...order,
-    // Display only — SevDesk's own dedup check is still what's authoritative.
+    // Local queue status only — SevDesk's own dedup check (alreadyInSevDesk) is authoritative.
     syncStatus:
       coverage.find((c) => c.shopifyOrderId === order.shopifyOrderId)
         ?.status ?? null,
@@ -87,6 +92,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     items,
     statusCounts,
     orders,
+    pageInfo: recentOrdersPage.pageInfo,
   };
 };
 
@@ -140,9 +146,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function Index() {
-  const { syncEnabled, items, statusCounts, orders } =
+  const { syncEnabled, items, statusCounts, orders, pageInfo } =
     useLoaderData<typeof loader>();
   const shopify = useAppBridge();
+  const navigate = useNavigate();
 
   const toggleFetcher = useFetcher<typeof action>();
   const backfillFetcher = useFetcher<typeof action>();
@@ -209,6 +216,14 @@ export default function Index() {
     retryFetcher.submit({ intent: "retry", itemId }, { method: "POST" });
   };
 
+  const goToNextOrdersPage = () => {
+    if (pageInfo.endCursor) navigate(`?after=${pageInfo.endCursor}`);
+  };
+
+  const goToPreviousOrdersPage = () => {
+    if (pageInfo.startCursor) navigate(`?before=${pageInfo.startCursor}`);
+  };
+
   return (
     <s-page heading="SevDesk sync">
       <s-section heading="Live sync">
@@ -232,7 +247,8 @@ export default function Index() {
             <s-table-header>Order</s-table-header>
             <s-table-header>Date</s-table-header>
             <s-table-header>Financial status</s-table-header>
-            <s-table-header>Sync status</s-table-header>
+            <s-table-header>SevDesk status</s-table-header>
+            <s-table-header>Queue status</s-table-header>
             <s-table-header>Action</s-table-header>
           </s-table-header-row>
           <s-table-body>
@@ -243,6 +259,13 @@ export default function Index() {
                   {new Date(order.createdAt).toLocaleDateString()}
                 </s-table-cell>
                 <s-table-cell>{order.financialStatus ?? ""}</s-table-cell>
+                <s-table-cell>
+                  {order.alreadyInSevDesk ? (
+                    <s-badge tone="success">In SevDesk</s-badge>
+                  ) : (
+                    <s-badge tone="warning">Not in SevDesk yet</s-badge>
+                  )}
+                </s-table-cell>
                 <s-table-cell>
                   {order.syncStatus ? (
                     <s-badge
@@ -258,24 +281,44 @@ export default function Index() {
                   )}
                 </s-table-cell>
                 <s-table-cell>
-                  <s-button
-                    variant="tertiary"
-                    {...(syncOrderFetcher.state !== "idle" &&
-                    syncOrderFetcher.formData?.get("shopifyOrderId") ===
-                      order.shopifyOrderId
-                      ? { loading: true }
-                      : {})}
-                    onClick={() =>
-                      syncOrder(order.shopifyOrderId, order.shopifyOrderName)
-                    }
-                  >
-                    Sync this order
-                  </s-button>
+                  {order.alreadyInSevDesk ? (
+                    <s-text color="subdued">Already in SevDesk</s-text>
+                  ) : (
+                    <s-button
+                      variant="tertiary"
+                      {...(syncOrderFetcher.state !== "idle" &&
+                      syncOrderFetcher.formData?.get("shopifyOrderId") ===
+                        order.shopifyOrderId
+                        ? { loading: true }
+                        : {})}
+                      onClick={() =>
+                        syncOrder(order.shopifyOrderId, order.shopifyOrderName)
+                      }
+                    >
+                      Sync this order
+                    </s-button>
+                  )}
                 </s-table-cell>
               </s-table-row>
             ))}
           </s-table-body>
         </s-table>
+        <s-stack direction="inline" gap="base">
+          <s-button
+            variant="tertiary"
+            disabled={!pageInfo.hasPreviousPage}
+            onClick={goToPreviousOrdersPage}
+          >
+            Previous
+          </s-button>
+          <s-button
+            variant="tertiary"
+            disabled={!pageInfo.hasNextPage}
+            onClick={goToNextOrdersPage}
+          >
+            Next
+          </s-button>
+        </s-stack>
       </s-section>
 
       <s-section heading="Historical backfill">

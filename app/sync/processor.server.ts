@@ -5,6 +5,7 @@ import {
   createCreditNoteForOrder,
   createInvoiceForOrder,
   findInvoicesByOrderName,
+  tagObject,
   upsertContactByEmail,
 } from "../sevdesk/client.server";
 import type { ContactInput, OrderLineItem } from "../sevdesk/types";
@@ -70,6 +71,42 @@ interface OrderForSyncResponse {
 const INVOICE_TOPICS = new Set(["orders/create", "orders/paid", "backfill"]);
 const CREDIT_NOTE_TOPICS = new Set(["orders/cancelled", "refunds/create"]);
 
+interface ResolvedSevDeskSettings {
+  sevdeskContactPersonId: string;
+  sevdeskTaxRuleId: string;
+  sevdeskCategoryId: string;
+  invoiceStatus: string;
+  currency: string;
+}
+
+function resolveSettings(
+  settings: {
+    sevdeskContactPersonId: string | null;
+    sevdeskTaxRuleId: string | null;
+    sevdeskCategoryId: string | null;
+    invoiceStatus: string | null;
+    currency: string | null;
+  } | null,
+): ResolvedSevDeskSettings {
+  if (
+    !settings ||
+    !settings.sevdeskContactPersonId ||
+    !settings.sevdeskTaxRuleId ||
+    !settings.sevdeskCategoryId ||
+    !settings.invoiceStatus ||
+    !settings.currency
+  ) {
+    throw new Error("SevDesk settings not configured — visit the Settings page");
+  }
+  return {
+    sevdeskContactPersonId: settings.sevdeskContactPersonId,
+    sevdeskTaxRuleId: settings.sevdeskTaxRuleId,
+    sevdeskCategoryId: settings.sevdeskCategoryId,
+    invoiceStatus: settings.invoiceStatus,
+    currency: settings.currency,
+  };
+}
+
 function toOrderGid(shopifyOrderId: string): string {
   return shopifyOrderId.startsWith("gid://")
     ? shopifyOrderId
@@ -87,12 +124,41 @@ function resolveEmail(order: OrderForSyncResponse["data"]["order"]): string {
 
 function buildContactInput(
   order: NonNullable<OrderForSyncResponse["data"]["order"]>,
+  categoryId: string,
 ): ContactInput {
   return {
     email: resolveEmail(order),
     firstName: order.customer?.firstName ?? undefined,
     lastName: order.customer?.lastName ?? undefined,
+    categoryId,
   };
+}
+
+function shopHandle(shop: string): string {
+  return shop.replace(/\.myshopify\.com$/, "");
+}
+
+// Mirrors the old official app's tags (confirmed in FINDINGS.md: every one of
+// its invoices carries "Shopify" + the shop handle + an order-number tag) so
+// invoices stay filterable in the SevDesk UI the same way they always have.
+// Never fatal — a tagging hiccup shouldn't undo an otherwise-successful sync.
+async function applyShopifyTags(
+  shop: string,
+  orderName: string,
+  sevdeskId: string,
+  objectType: "Invoice" | "CreditNote",
+): Promise<void> {
+  try {
+    await tagObject(sevdeskId, objectType, [
+      "Shopify",
+      shopHandle(shop),
+      orderName,
+    ]);
+  } catch (error) {
+    console.error(
+      `Failed to tag ${objectType} for order ${orderName}: ${String(error)}`,
+    );
+  }
 }
 
 function buildLineItems(
@@ -125,15 +191,19 @@ export async function processSyncItem(item: SyncItem): Promise<void> {
       `Processing ${item.topic} for order ${realOrderName} (${item.shopifyOrderId})`,
     );
 
+    const settings = resolveSettings(
+      await db.syncSettings.findUnique({ where: { shop: item.shop } }),
+    );
+
     const matches = await findInvoicesByOrderName(realOrderName);
 
     if (INVOICE_TOPICS.has(item.topic)) {
-      await handleInvoiceTopic(item, order, realOrderName, matches);
+      await handleInvoiceTopic(item, order, realOrderName, matches, settings);
       return;
     }
 
     if (CREDIT_NOTE_TOPICS.has(item.topic)) {
-      await handleCreditNoteTopic(item, order, realOrderName, matches);
+      await handleCreditNoteTopic(item, order, realOrderName, matches, settings);
       return;
     }
 
@@ -160,6 +230,7 @@ async function handleInvoiceTopic(
   order: NonNullable<OrderForSyncResponse["data"]["order"]>,
   realOrderName: string,
   matches: Awaited<ReturnType<typeof findInvoicesByOrderName>>,
+  settings: ResolvedSevDeskSettings,
 ): Promise<void> {
   if (matches.length > 0) {
     console.log(`Order ${realOrderName} already invoiced, skipping`);
@@ -174,15 +245,22 @@ async function handleInvoiceTopic(
     return;
   }
 
-  const contact = await upsertContactByEmail(buildContactInput(order));
+  const contact = await upsertContactByEmail(
+    buildContactInput(order, settings.sevdeskCategoryId),
+  );
   const invoice = await createInvoiceForOrder({
     orderName: realOrderName,
     contactId: contact.id,
     invoiceDate: new Date(),
     lineItems: buildLineItems(order),
+    contactPersonId: settings.sevdeskContactPersonId,
+    taxRuleId: settings.sevdeskTaxRuleId,
+    currency: settings.currency,
+    status: settings.invoiceStatus,
   });
 
   console.log(`Created invoice for order ${realOrderName}`);
+  await applyShopifyTags(item.shop, realOrderName, invoice.id, "Invoice");
   await db.syncItem.update({
     where: { id: item.id },
     data: {
@@ -198,6 +276,7 @@ async function handleCreditNoteTopic(
   order: NonNullable<OrderForSyncResponse["data"]["order"]>,
   realOrderName: string,
   matches: Awaited<ReturnType<typeof findInvoicesByOrderName>>,
+  settings: ResolvedSevDeskSettings,
 ): Promise<void> {
   if (matches.length === 0) {
     console.log(`No invoice found for order ${realOrderName}, skipping credit note`);
@@ -219,16 +298,28 @@ async function handleCreditNoteTopic(
     );
   }
 
-  const contact = await upsertContactByEmail(buildContactInput(order));
+  const contact = await upsertContactByEmail(
+    buildContactInput(order, settings.sevdeskCategoryId),
+  );
   const creditNote = await createCreditNoteForOrder({
     orderName: realOrderName,
     contactId: contact.id,
     relatedInvoiceId: matches[0].id,
     creditNoteDate: new Date(),
     lineItems: buildLineItems(order),
+    contactPersonId: settings.sevdeskContactPersonId,
+    taxRuleId: settings.sevdeskTaxRuleId,
+    currency: settings.currency,
+    status: settings.invoiceStatus,
   });
 
   console.log(`Created credit note for order ${realOrderName}`);
+  await applyShopifyTags(
+    item.shop,
+    realOrderName,
+    creditNote.id,
+    "CreditNote",
+  );
   await db.syncItem.update({
     where: { id: item.id },
     data: {

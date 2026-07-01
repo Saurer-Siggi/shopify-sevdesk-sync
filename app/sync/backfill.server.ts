@@ -1,8 +1,11 @@
 import db from "../db.server";
 import { unauthenticated } from "../shopify.server";
+import { sevGet } from "../sevdesk/http.server";
 
 const PAGE_SIZE = 100;
 const MAX_PAGES = 50;
+const DEFAULT_RECENT_ORDERS_PAGE_SIZE = 25;
+const INVOICED_ORDER_NAMES_LIMIT = 500;
 
 const ORDERS_FOR_BACKFILL_QUERY = `#graphql
   query OrdersForBackfill($first: Int!, $after: String, $query: String) {
@@ -102,14 +105,39 @@ export async function syncSingleOrder(
   return { enqueued };
 }
 
-const RECENT_ORDERS_QUERY = `#graphql
-  query RecentOrdersForPicker($first: Int!) {
-    orders(first: $first, sortKey: CREATED_AT, reverse: true) {
+const RECENT_ORDERS_FORWARD_QUERY = `#graphql
+  query RecentOrdersForward($first: Int!, $after: String) {
+    orders(first: $first, after: $after, sortKey: CREATED_AT, reverse: true) {
       nodes {
         id
         name
         createdAt
         displayFinancialStatus
+      }
+      pageInfo {
+        hasNextPage
+        hasPreviousPage
+        startCursor
+        endCursor
+      }
+    }
+  }
+`;
+
+const RECENT_ORDERS_BACKWARD_QUERY = `#graphql
+  query RecentOrdersBackward($last: Int!, $before: String) {
+    orders(last: $last, before: $before, sortKey: CREATED_AT, reverse: true) {
+      nodes {
+        id
+        name
+        createdAt
+        displayFinancialStatus
+      }
+      pageInfo {
+        hasNextPage
+        hasPreviousPage
+        startCursor
+        endCursor
       }
     }
   }
@@ -124,6 +152,12 @@ interface RecentOrdersResponse {
         createdAt: string;
         displayFinancialStatus: string | null;
       }>;
+      pageInfo: {
+        hasNextPage: boolean;
+        hasPreviousPage: boolean;
+        startCursor: string | null;
+        endCursor: string | null;
+      };
     };
   };
 }
@@ -133,22 +167,66 @@ export interface RecentOrder {
   shopifyOrderName: string;
   createdAt: string;
   financialStatus: string | null;
+  alreadyInSevDesk: boolean;
+}
+
+export interface RecentOrdersPage {
+  orders: RecentOrder[];
+  pageInfo: {
+    hasNextPage: boolean;
+    hasPreviousPage: boolean;
+    startCursor: string | null;
+    endCursor: string | null;
+  };
+}
+
+interface RawInvoiceNote {
+  customerInternalNote?: string | null;
+}
+
+// Bulk fetch instead of one findInvoicesByOrderName call per displayed order —
+// avoids N+1 live SevDesk requests on every admin page load.
+async function fetchInvoicedOrderNames(
+  limit = INVOICED_ORDER_NAMES_LIMIT,
+): Promise<Set<string>> {
+  const invoices = await sevGet<RawInvoiceNote>("/Invoice", {
+    limit: String(limit),
+    orderBy: "invoiceDate DESC",
+  });
+  const names = new Set<string>();
+  for (const invoice of invoices) {
+    if (invoice.customerInternalNote) names.add(invoice.customerInternalNote);
+  }
+  return names;
 }
 
 export async function listRecentOrders(
   shop: string,
-  limit = 25,
-): Promise<RecentOrder[]> {
+  options?: { after?: string; before?: string; pageSize?: number },
+): Promise<RecentOrdersPage> {
+  const pageSize = options?.pageSize ?? DEFAULT_RECENT_ORDERS_PAGE_SIZE;
   const { admin } = await unauthenticated.admin(shop);
-  const response = await admin.graphql(RECENT_ORDERS_QUERY, {
-    variables: { first: limit },
-  });
+
+  const [response, invoicedNames] = await Promise.all([
+    options?.before
+      ? admin.graphql(RECENT_ORDERS_BACKWARD_QUERY, {
+          variables: { last: pageSize, before: options.before },
+        })
+      : admin.graphql(RECENT_ORDERS_FORWARD_QUERY, {
+          variables: { first: pageSize, after: options?.after ?? null },
+        }),
+    fetchInvoicedOrderNames(),
+  ]);
   const { data } = (await response.json()) as RecentOrdersResponse;
 
-  return data.orders.nodes.map((node) => ({
-    shopifyOrderId: toBareOrderId(node.id),
-    shopifyOrderName: node.name,
-    createdAt: node.createdAt,
-    financialStatus: node.displayFinancialStatus,
-  }));
+  return {
+    orders: data.orders.nodes.map((node) => ({
+      shopifyOrderId: toBareOrderId(node.id),
+      shopifyOrderName: node.name,
+      createdAt: node.createdAt,
+      financialStatus: node.displayFinancialStatus,
+      alreadyInSevDesk: invoicedNames.has(node.name),
+    })),
+    pageInfo: data.orders.pageInfo,
+  };
 }

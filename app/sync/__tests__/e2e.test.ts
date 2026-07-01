@@ -25,12 +25,22 @@ interface FakeSyncItem {
 let items: FakeSyncItem[] = [];
 let nextId = 1;
 
+const FAKE_SETTINGS = {
+  shop: SHOP,
+  syncEnabled: true,
+  sevdeskContactPersonId: "999",
+  sevdeskTaxRuleId: "1",
+  sevdeskCategoryId: "3",
+  invoiceStatus: "100",
+  currency: "EUR",
+};
+
 const dbMock = {
   syncSettings: {
     findUnique: vi.fn(async ({ where: { shop } }: { where: { shop: string } }) =>
-      shop === SHOP ? { shop, syncEnabled: true } : null,
+      shop === SHOP ? FAKE_SETTINGS : null,
     ),
-    findMany: vi.fn(async () => [{ shop: SHOP, syncEnabled: true }]),
+    findMany: vi.fn(async () => [FAKE_SETTINGS]),
   },
   syncItem: {
     create: vi.fn(async ({ data }: { data: Omit<FakeSyncItem, "id" | "status" | "attempts" | "lastError" | "sevdeskInvoiceId"> }) => {

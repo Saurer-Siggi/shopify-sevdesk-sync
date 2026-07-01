@@ -5,11 +5,13 @@ const findInvoicesByOrderNameMock = vi.fn();
 const upsertContactByEmailMock = vi.fn();
 const createInvoiceForOrderMock = vi.fn();
 const createCreditNoteForOrderMock = vi.fn();
+const tagObjectMock = vi.fn().mockResolvedValue(undefined);
 vi.mock("../sevdesk/client.server", () => ({
   findInvoicesByOrderName: findInvoicesByOrderNameMock,
   upsertContactByEmail: upsertContactByEmailMock,
   createInvoiceForOrder: createInvoiceForOrderMock,
   createCreditNoteForOrder: createCreditNoteForOrderMock,
+  tagObject: tagObjectMock,
 }));
 
 const graphqlMock = vi.fn();
@@ -19,9 +21,11 @@ vi.mock("../shopify.server", () => ({
 }));
 
 const syncItemUpdateMock = vi.fn();
+const syncSettingsFindUniqueMock = vi.fn();
 vi.mock("../db.server", () => ({
   default: {
     syncItem: { update: syncItemUpdateMock },
+    syncSettings: { findUnique: syncSettingsFindUniqueMock },
   },
 }));
 
@@ -89,6 +93,16 @@ function makeSyncItem(overrides: Partial<SyncItem> = {}): SyncItem {
 beforeEach(() => {
   vi.clearAllMocks();
   unauthenticatedAdminMock.mockResolvedValue({ admin: { graphql: graphqlMock } });
+  syncSettingsFindUniqueMock.mockResolvedValue({
+    shop: SHOP,
+    syncEnabled: true,
+    sevdeskContactPersonId: "999",
+    sevdeskTaxRuleId: "1",
+    sevdeskCategoryId: "3",
+    invoiceStatus: "100",
+    currency: "EUR",
+    updatedAt: new Date("2026-06-01T00:00:00Z"),
+  });
 });
 
 describe("processSyncItem — invoice topics", () => {
@@ -129,6 +143,7 @@ describe("processSyncItem — invoice topics", () => {
       email: "test@example.invalid",
       firstName: "Max",
       lastName: "Mustermann",
+      categoryId: "3",
     });
     expect(createInvoiceForOrderMock).toHaveBeenCalledExactlyOnceWith({
       orderName: "#1050",
@@ -142,12 +157,44 @@ describe("processSyncItem — invoice topics", () => {
           taxRatePercent: 19,
         },
       ],
+      contactPersonId: "999",
+      taxRuleId: "1",
+      currency: "EUR",
+      status: "100",
     });
+    expect(tagObjectMock).toHaveBeenCalledExactlyOnceWith(
+      "sd-invoice-1",
+      "Invoice",
+      ["Shopify", "example", "#1050"],
+    );
     expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
       where: { id: "item-1" },
       data: {
         status: "success",
         sevdeskInvoiceId: "sd-invoice-1",
+        shopifyOrderName: "#1050",
+      },
+    });
+  });
+
+  it("still succeeds when tagging fails — tagging is cosmetic, not authoritative", async () => {
+    graphqlMock.mockResolvedValueOnce(makeOrderResponse());
+    findInvoicesByOrderNameMock.mockResolvedValueOnce([]);
+    upsertContactByEmailMock.mockResolvedValueOnce({ id: "contact-1" });
+    createInvoiceForOrderMock.mockResolvedValueOnce({
+      id: "sd-invoice-2",
+      invoiceNumber: "RN-2026-0003",
+    });
+    tagObjectMock.mockRejectedValueOnce(new Error("SevDesk tag API down"));
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
+      where: { id: "item-1" },
+      data: {
+        status: "success",
+        sevdeskInvoiceId: "sd-invoice-2",
         shopifyOrderName: "#1050",
       },
     });
@@ -181,7 +228,16 @@ describe("processSyncItem — credit note topics", () => {
           taxRatePercent: 19,
         },
       ],
+      contactPersonId: "999",
+      taxRuleId: "1",
+      currency: "EUR",
+      status: "100",
     });
+    expect(tagObjectMock).toHaveBeenCalledExactlyOnceWith(
+      "sd-credit-1",
+      "CreditNote",
+      ["Shopify", "example", "#1051"],
+    );
     expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
       where: { id: "item-1" },
       data: {
@@ -304,6 +360,57 @@ describe("processSyncItem — error handling", () => {
         attempts: { increment: 1 },
         status: "error",
         lastError: expect.stringContaining("orders/updated"),
+        shopifyOrderName: "#1050",
+      },
+    });
+  });
+
+  it("fails with a clear error and no SevDesk writes when settings are missing", async () => {
+    graphqlMock.mockResolvedValueOnce(makeOrderResponse());
+    syncSettingsFindUniqueMock.mockResolvedValueOnce(null);
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(upsertContactByEmailMock).not.toHaveBeenCalled();
+    expect(createInvoiceForOrderMock).not.toHaveBeenCalled();
+    expect(createCreditNoteForOrderMock).not.toHaveBeenCalled();
+    expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
+      where: { id: "item-1" },
+      data: {
+        attempts: { increment: 1 },
+        status: "error",
+        lastError: "SevDesk settings not configured — visit the Settings page",
+        shopifyOrderName: "#1050",
+      },
+    });
+  });
+
+  it("fails with a clear error when settings are only partially configured", async () => {
+    graphqlMock.mockResolvedValueOnce(makeOrderResponse());
+    syncSettingsFindUniqueMock.mockResolvedValueOnce({
+      shop: SHOP,
+      syncEnabled: true,
+      sevdeskContactPersonId: "999",
+      sevdeskTaxRuleId: null,
+      sevdeskCategoryId: "3",
+      invoiceStatus: "100",
+      currency: "EUR",
+      updatedAt: new Date("2026-06-01T00:00:00Z"),
+    });
+    const { processSyncItem } = await import("./processor.server");
+
+    await processSyncItem(makeSyncItem());
+
+    expect(upsertContactByEmailMock).not.toHaveBeenCalled();
+    expect(createInvoiceForOrderMock).not.toHaveBeenCalled();
+    expect(createCreditNoteForOrderMock).not.toHaveBeenCalled();
+    expect(syncItemUpdateMock).toHaveBeenCalledExactlyOnceWith({
+      where: { id: "item-1" },
+      data: {
+        attempts: { increment: 1 },
+        status: "error",
+        lastError: "SevDesk settings not configured — visit the Settings page",
         shopifyOrderName: "#1050",
       },
     });

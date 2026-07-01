@@ -35,9 +35,14 @@ model Session {
 
 // Not the dedup source of truth — that's always a live SevDesk query (see app/sevdesk).
 model SyncSettings {
-  shop        String   @id
-  syncEnabled Boolean  @default(false)
-  updatedAt   DateTime @updatedAt
+  shop                   String   @id
+  syncEnabled            Boolean  @default(false)
+  sevdeskContactPersonId String?
+  sevdeskTaxRuleId       String?
+  sevdeskCategoryId      String?
+  invoiceStatus          String?  // "100" (Draft) or "1000" (Open) — null means "not configured yet"
+  currency               String?
+  updatedAt              DateTime @updatedAt
 }
 
 // Doubles as the worker's queue (status = "pending") and the admin UI's log. No customer PII.

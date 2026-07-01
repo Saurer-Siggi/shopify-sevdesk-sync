@@ -14,6 +14,11 @@ vi.mock("../db.server", () => ({
   },
 }));
 
+const sevGetMock = vi.fn();
+vi.mock("../sevdesk/http.server", () => ({
+  sevGet: sevGetMock,
+}));
+
 const SHOP = "example.myshopify.com";
 
 function jsonResponse(body: unknown): { json: () => Promise<unknown> } {
@@ -34,9 +39,34 @@ function ordersPage(
   });
 }
 
+function recentOrdersPage(
+  orders: Array<{
+    id: string;
+    name: string;
+    createdAt: string;
+    displayFinancialStatus: string | null;
+  }>,
+  pageInfo: {
+    hasNextPage: boolean;
+    hasPreviousPage: boolean;
+    startCursor: string | null;
+    endCursor: string | null;
+  },
+) {
+  return jsonResponse({
+    data: {
+      orders: {
+        nodes: orders,
+        pageInfo,
+      },
+    },
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   unauthenticatedAdminMock.mockResolvedValue({ admin: { graphql: graphqlMock } });
+  sevGetMock.mockResolvedValue([]);
 });
 
 describe("triggerBackfill", () => {
@@ -125,5 +155,121 @@ describe("triggerBackfill", () => {
     const result = await triggerBackfill(SHOP, "2020-01-01", "2026-01-01");
 
     expect(result.truncated).toBe(true);
+  });
+});
+
+describe("listRecentOrders", () => {
+  const PAGE_INFO = {
+    hasNextPage: true,
+    hasPreviousPage: false,
+    startCursor: "start-1",
+    endCursor: "end-1",
+  };
+
+  it("requests a forward page by default and marks orders found in SevDesk", async () => {
+    graphqlMock.mockResolvedValueOnce(
+      recentOrdersPage(
+        [
+          {
+            id: "gid://shopify/Order/1001",
+            name: "#1001",
+            createdAt: "2026-06-01T00:00:00Z",
+            displayFinancialStatus: "PAID",
+          },
+          {
+            id: "gid://shopify/Order/1002",
+            name: "#1002",
+            createdAt: "2026-06-02T00:00:00Z",
+            displayFinancialStatus: "PAID",
+          },
+        ],
+        PAGE_INFO,
+      ),
+    );
+    sevGetMock.mockResolvedValueOnce([
+      { customerInternalNote: "#1001" },
+      { customerInternalNote: null },
+    ]);
+    const { listRecentOrders } = await import("./backfill.server");
+
+    const result = await listRecentOrders(SHOP);
+
+    expect(graphqlMock).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining("RecentOrdersForward"),
+      { variables: { first: 25, after: null } },
+    );
+    expect(result.orders).toEqual([
+      {
+        shopifyOrderId: "1001",
+        shopifyOrderName: "#1001",
+        createdAt: "2026-06-01T00:00:00Z",
+        financialStatus: "PAID",
+        alreadyInSevDesk: true,
+      },
+      {
+        shopifyOrderId: "1002",
+        shopifyOrderName: "#1002",
+        createdAt: "2026-06-02T00:00:00Z",
+        financialStatus: "PAID",
+        alreadyInSevDesk: false,
+      },
+    ]);
+    expect(result.pageInfo).toEqual(PAGE_INFO);
+  });
+
+  it("uses the backward query with last/before when a before cursor is given", async () => {
+    graphqlMock.mockResolvedValueOnce(recentOrdersPage([], PAGE_INFO));
+    const { listRecentOrders } = await import("./backfill.server");
+
+    await listRecentOrders(SHOP, { before: "cursor-abc", pageSize: 10 });
+
+    expect(graphqlMock).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining("RecentOrdersBackward"),
+      { variables: { last: 10, before: "cursor-abc" } },
+    );
+  });
+
+  it("uses the forward query with first/after when an after cursor is given", async () => {
+    graphqlMock.mockResolvedValueOnce(recentOrdersPage([], PAGE_INFO));
+    const { listRecentOrders } = await import("./backfill.server");
+
+    await listRecentOrders(SHOP, { after: "cursor-xyz" });
+
+    expect(graphqlMock).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining("RecentOrdersForward"),
+      { variables: { first: 25, after: "cursor-xyz" } },
+    );
+  });
+
+  it("fetches SevDesk invoices once via a bulk lookup, not per order", async () => {
+    graphqlMock.mockResolvedValueOnce(
+      recentOrdersPage(
+        [
+          {
+            id: "gid://shopify/Order/1",
+            name: "#1",
+            createdAt: "2026-06-01T00:00:00Z",
+            displayFinancialStatus: "PAID",
+          },
+          {
+            id: "gid://shopify/Order/2",
+            name: "#2",
+            createdAt: "2026-06-02T00:00:00Z",
+            displayFinancialStatus: "PAID",
+          },
+        ],
+        PAGE_INFO,
+      ),
+    );
+    sevGetMock.mockResolvedValueOnce([]);
+    const { listRecentOrders } = await import("./backfill.server");
+
+    await listRecentOrders(SHOP);
+
+    expect(sevGetMock).toHaveBeenCalledTimes(1);
+    expect(sevGetMock).toHaveBeenCalledWith(
+      "/Invoice",
+      expect.objectContaining({ limit: expect.any(String) }),
+    );
   });
 });

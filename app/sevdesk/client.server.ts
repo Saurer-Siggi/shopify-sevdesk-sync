@@ -1,4 +1,4 @@
-import { contactPersonId, sevGet, sevPost } from "./http.server";
+import { sevGet, sevPost } from "./http.server";
 import type {
   ContactInput,
   CreateCreditNoteInput,
@@ -9,11 +9,7 @@ import type {
   SevDeskInvoiceRef,
 } from "./types";
 
-const CUSTOMER_CATEGORY_ID = "3";
-const STANDARD_TAX_RULE_ID = "1";
 const EMAIL_COMMUNICATION_TYPE = "EMAIL";
-const CURRENCY = "EUR";
-const INVOICE_STATUS_DRAFT = "100";
 
 interface RawInvoice {
   id: string;
@@ -82,7 +78,7 @@ function buildContactPayload(input: ContactInput) {
     ...(person
       ? { surename: input.firstName, familyname: input.lastName }
       : { name: input.company }),
-    category: { id: CUSTOMER_CATEGORY_ID, objectName: "Category" },
+    category: { id: input.categoryId, objectName: "Category" },
     objectName: "Contact",
     mapAll: true,
   };
@@ -100,12 +96,12 @@ export async function createInvoiceForOrder(
     {
       invoice: {
         contact: { id: input.contactId, objectName: "Contact" },
-        contactPerson: { id: contactPersonId(), objectName: "SevUser" },
+        contactPerson: { id: input.contactPersonId, objectName: "SevUser" },
         invoiceDate: formatDate(input.invoiceDate),
-        status: INVOICE_STATUS_DRAFT,
+        status: input.status,
         invoiceType: "RE",
-        currency: CURRENCY,
-        taxRule: { id: STANDARD_TAX_RULE_ID, objectName: "TaxRule" },
+        currency: input.currency,
+        taxRule: { id: input.taxRuleId, objectName: "TaxRule" },
         // SevDesk requires a header-level taxRate even though positions carry
         // their own; use the first line item's rate as the representative one.
         taxRate: input.lineItems[0]?.taxRatePercent ?? 19,
@@ -154,11 +150,11 @@ export async function createCreditNoteForOrder(
     {
       creditNote: {
         contact: { id: input.contactId, objectName: "Contact" },
-        contactPerson: { id: contactPersonId(), objectName: "SevUser" },
+        contactPerson: { id: input.contactPersonId, objectName: "SevUser" },
         creditNoteDate: formatDate(input.creditNoteDate),
-        status: INVOICE_STATUS_DRAFT,
-        currency: CURRENCY,
-        taxRule: { id: STANDARD_TAX_RULE_ID, objectName: "TaxRule" },
+        status: input.status,
+        currency: input.currency,
+        taxRule: { id: input.taxRuleId, objectName: "TaxRule" },
         taxRate: input.lineItems[0]?.taxRatePercent ?? 19,
         customerInternalNote: input.orderName,
         refSrcInvoice: { id: input.relatedInvoiceId, objectName: "Invoice" },
@@ -187,4 +183,70 @@ export async function createCreditNoteForOrder(
 
 function formatDate(date: Date): string {
   return date.toISOString().slice(0, 10);
+}
+
+interface RawTag {
+  id: string;
+}
+
+// The tag names "Shopify" and the shop handle never change within a process,
+// so caching their ids avoids re-querying SevDesk on every single invoice.
+const tagIdCache = new Map<string, string>();
+
+async function findOrCreateTagId(name: string): Promise<string> {
+  const cached = tagIdCache.get(name);
+  if (cached) return cached;
+
+  const existing = await sevGet<RawTag>("/Tag", { name });
+  if (existing[0]) {
+    tagIdCache.set(name, existing[0].id);
+    return existing[0].id;
+  }
+
+  const created = await sevPost<{ objects: RawTag }>("/Tag", {
+    name,
+    objectName: "Tag",
+  });
+  tagIdCache.set(name, created.objects.id);
+  return created.objects.id;
+}
+
+// Mirrors the old official app's tagging so invoices/credit notes stay
+// filterable/searchable in the SevDesk UI the same way they always have been.
+export async function tagObject(
+  objectId: string,
+  objectType: "Invoice" | "CreditNote",
+  tagNames: string[],
+): Promise<void> {
+  for (const name of tagNames) {
+    const tagId = await findOrCreateTagId(name);
+    await sevPost("/TagRelation", {
+      tag: { id: tagId, objectName: "Tag" },
+      object: { id: objectId, objectName: objectType },
+      objectName: "TagRelation",
+      mapAll: true,
+    });
+  }
+}
+
+interface RawSevUser {
+  id: string;
+  fullname: string;
+}
+
+export async function listSevUsers(): Promise<
+  { id: string; fullname: string }[]
+> {
+  const users = await sevGet<RawSevUser>("/SevUser");
+  return users.map((user) => ({ id: user.id, fullname: user.fullname }));
+}
+
+interface RawTaxRule {
+  id: string;
+  name: string;
+}
+
+export async function listTaxRules(): Promise<{ id: string; name: string }[]> {
+  const rules = await sevGet<RawTaxRule>("/TaxRule");
+  return rules.map((rule) => ({ id: rule.id, name: rule.name }));
 }

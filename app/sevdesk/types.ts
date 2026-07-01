@@ -16,6 +16,7 @@ export interface ContactInput {
   firstName?: string;
   lastName?: string;
   company?: string;
+  categoryId: string;
 }
 
 export interface OrderLineItem {
@@ -30,6 +31,10 @@ export interface CreateInvoiceInput {
   contactId: string;
   invoiceDate: Date;
   lineItems: OrderLineItem[];
+  contactPersonId: string;
+  taxRuleId: string;
+  currency: string;
+  status: string;
 }
 
 export interface CreateCreditNoteInput {
@@ -38,4 +43,8 @@ export interface CreateCreditNoteInput {
   relatedInvoiceId: string;
   creditNoteDate: Date;
   lineItems: OrderLineItem[];
+  contactPersonId: string;
+  taxRuleId: string;
+  currency: string;
+  status: string;
 }

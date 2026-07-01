@@ -3,6 +3,9 @@ import {
   createCreditNoteForOrder,
   createInvoiceForOrder,
   findInvoicesByOrderName,
+  listSevUsers,
+  listTaxRules,
+  tagObject,
   upsertContactByEmail,
 } from "./client.server";
 
@@ -22,7 +25,6 @@ beforeEach(() => {
   fetchMock.mockReset();
   vi.stubGlobal("fetch", fetchMock);
   process.env.SEVDESK_API_TOKEN = "test-token";
-  process.env.SEVDESK_CONTACT_PERSON_ID = "42";
 });
 
 describe("findInvoicesByOrderName", () => {
@@ -105,6 +107,7 @@ describe("upsertContactByEmail", () => {
       email: "test@example.invalid",
       firstName: "Max",
       lastName: "Mustermann",
+      categoryId: "3",
     });
 
     expect(result).toEqual({ id: "501" });
@@ -121,6 +124,7 @@ describe("upsertContactByEmail", () => {
       email: "test@example.invalid",
       firstName: "Max",
       lastName: "Mustermann",
+      categoryId: "3",
     });
 
     expect(result).toEqual({ id: "777" });
@@ -160,6 +164,7 @@ describe("upsertContactByEmail", () => {
     await upsertContactByEmail({
       email: "orders@example.invalid",
       company: "Beispiel GmbH",
+      categoryId: "3",
     });
 
     const [, createContactInit] = fetchMock.mock.calls[1] as [
@@ -188,6 +193,10 @@ describe("createInvoiceForOrder", () => {
         { name: "Kräuterlikör 0,7l", quantity: 2, unitPriceGross: 19.99, taxRatePercent: 19 },
         { name: "Bio-Apfelsaft 1l", quantity: 1, unitPriceGross: 3.49, taxRatePercent: 7 },
       ],
+      contactPersonId: "999",
+      taxRuleId: "1",
+      currency: "EUR",
+      status: "100",
     });
 
     expect(result).toEqual({ id: "1001", invoiceNumber: "RN-2026-2000" });
@@ -201,6 +210,9 @@ describe("createInvoiceForOrder", () => {
     // SevDesk rejects invoice creation with a DB-level error if this header field is missing.
     expect(body.invoice.taxRate).toBe(19);
     expect(body.invoice.contact).toEqual({ id: "501", objectName: "Contact" });
+    expect(body.invoice.contactPerson).toEqual({ id: "999", objectName: "SevUser" });
+    expect(body.invoice.currency).toBe("EUR");
+    expect(body.invoice.status).toBe("100");
     expect(body.invoicePosSave).toHaveLength(2);
     expect(body.invoicePosSave[0]).toMatchObject({
       name: "Kräuterlikör 0,7l",
@@ -230,6 +242,10 @@ describe("createInvoiceForOrder", () => {
       lineItems: [
         { name: "Kräuterlikör 0,7l", quantity: 1, unitPriceGross: 19.99, taxRatePercent: 19 },
       ],
+      contactPersonId: "999",
+      taxRuleId: "1",
+      currency: "EUR",
+      status: "100",
     });
 
     const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
@@ -252,6 +268,10 @@ describe("createCreditNoteForOrder", () => {
       lineItems: [
         { name: "Kräuterlikör 0,7l", quantity: 1, unitPriceGross: 19.99, taxRatePercent: 19 },
       ],
+      contactPersonId: "999",
+      taxRuleId: "1",
+      currency: "EUR",
+      status: "100",
     });
 
     expect(result).toEqual({ id: "2001" });
@@ -266,6 +286,9 @@ describe("createCreditNoteForOrder", () => {
       id: "1001",
       objectName: "Invoice",
     });
+    expect(body.creditNote.contactPerson).toEqual({ id: "999", objectName: "SevUser" });
+    expect(body.creditNote.currency).toBe("EUR");
+    expect(body.creditNote.status).toBe("100");
     expect(body.creditNotePosSave).toHaveLength(1);
     expect(body.creditNotePosSave[0]).toMatchObject({
       name: "Kräuterlikör 0,7l",
@@ -273,5 +296,108 @@ describe("createCreditNoteForOrder", () => {
       price: 19.99,
       taxRate: 19,
     });
+  });
+});
+
+describe("listSevUsers", () => {
+  it("maps raw SevUser objects to id/fullname", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        objects: [{ id: "999", fullname: "Test User" }],
+      }),
+    );
+
+    const result = await listSevUsers();
+
+    expect(result).toEqual([{ id: "999", fullname: "Test User" }]);
+    const [url] = fetchMock.mock.calls[0] as [URL];
+    expect(url.toString()).toContain("/SevUser");
+  });
+});
+
+describe("listTaxRules", () => {
+  it("maps raw TaxRule objects to id/name", async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        objects: [{ id: "1", name: "Standard 19%" }],
+      }),
+    );
+
+    const result = await listTaxRules();
+
+    expect(result).toEqual([{ id: "1", name: "Standard 19%" }]);
+    const [url] = fetchMock.mock.calls[0] as [URL];
+    expect(url.toString()).toContain("/TaxRule");
+  });
+});
+
+describe("tagObject", () => {
+  it("creates a new tag and links it when no matching tag exists", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ objects: [] }))
+      .mockResolvedValueOnce(jsonResponse({ objects: { id: "9001" } }))
+      .mockResolvedValueOnce(jsonResponse({ objects: { id: "1" } }));
+
+    await tagObject("501", "Invoice", ["TestTagAlpha"]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const [lookupUrl] = fetchMock.mock.calls[0] as [URL];
+    expect(lookupUrl.toString()).toContain("/Tag");
+    expect(lookupUrl.searchParams.get("name")).toBe("TestTagAlpha");
+
+    const [createTagUrl, createTagInit] = fetchMock.mock.calls[1] as [
+      string,
+      RequestInit,
+    ];
+    expect(createTagUrl).toContain("/Tag");
+    expect(JSON.parse(createTagInit.body as string)).toMatchObject({
+      name: "TestTagAlpha",
+    });
+
+    const [relationUrl, relationInit] = fetchMock.mock.calls[2] as [
+      string,
+      RequestInit,
+    ];
+    expect(relationUrl).toContain("/TagRelation");
+    expect(JSON.parse(relationInit.body as string)).toMatchObject({
+      tag: { id: "9001", objectName: "Tag" },
+      object: { id: "501", objectName: "Invoice" },
+    });
+  });
+
+  it("reuses an existing tag by name instead of creating a duplicate", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({ objects: [{ id: "8001", name: "TestTagBeta" }] }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ objects: { id: "1" } }));
+
+    await tagObject("502", "CreditNote", ["TestTagBeta"]);
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [relationUrl, relationInit] = fetchMock.mock.calls[1] as [
+      string,
+      RequestInit,
+    ];
+    expect(relationUrl).toContain("/TagRelation");
+    expect(JSON.parse(relationInit.body as string)).toMatchObject({
+      tag: { id: "8001", objectName: "Tag" },
+      object: { id: "502", objectName: "CreditNote" },
+    });
+  });
+
+  it("caches a resolved tag id across calls instead of re-querying", async () => {
+    fetchMock
+      .mockResolvedValueOnce(
+        jsonResponse({ objects: [{ id: "8002", name: "TestTagGamma" }] }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ objects: { id: "1" } }))
+      .mockResolvedValueOnce(jsonResponse({ objects: { id: "1" } }));
+
+    await tagObject("503", "Invoice", ["TestTagGamma"]);
+    await tagObject("504", "Invoice", ["TestTagGamma"]);
+
+    // 1 lookup + 2 relation creates, not 2 lookups + 2 relation creates.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 });

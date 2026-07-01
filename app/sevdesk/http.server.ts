@@ -6,12 +6,6 @@ function authHeader(): string {
   return token;
 }
 
-export function contactPersonId(): string {
-  const id = process.env.SEVDESK_CONTACT_PERSON_ID;
-  if (!id) throw new Error("SEVDESK_CONTACT_PERSON_ID is not set");
-  return id;
-}
-
 export class SevDeskApiError extends Error {
   constructor(
     public readonly path: string,
