@@ -311,13 +311,14 @@ async function handleInvoiceTopic(
   const contact = await upsertContactByEmail(
     buildContactInput(order, settings.sevdeskCategoryId),
   );
-  const invoiceDate = new Date();
-  const deliverDate = order.processedAt ? new Date(order.processedAt) : invoiceDate;
+  // Backfilled orders can be months old — dating the invoice "today" would
+  // book revenue into the wrong VAT period. Old app used the order date too.
+  const orderDate = order.processedAt ? new Date(order.processedAt) : new Date();
   const invoice = await createInvoiceForOrder({
     orderName: realOrderName,
     contactId: contact.id,
-    invoiceDate,
-    deliverDate,
+    invoiceDate: orderDate,
+    deliverDate: orderDate,
     lineItems: buildLineItems(order),
     address: resolveAddress(order),
     contactPersonId: settings.sevdeskContactPersonId,

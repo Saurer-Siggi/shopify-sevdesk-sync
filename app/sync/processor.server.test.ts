@@ -174,7 +174,7 @@ describe("processSyncItem — invoice topics", () => {
     expect(createInvoiceForOrderMock).toHaveBeenCalledExactlyOnceWith({
       orderName: "#1050",
       contactId: "contact-1",
-      invoiceDate: expect.any(Date),
+      invoiceDate: new Date("2026-06-01T10:00:00.000Z"),
       deliverDate: new Date("2026-06-01T10:00:00.000Z"),
       lineItems: [
         {
