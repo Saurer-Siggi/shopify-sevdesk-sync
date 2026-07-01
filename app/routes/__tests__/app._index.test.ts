@@ -80,7 +80,7 @@ describe("app._index action", () => {
     });
   });
 
-  it("retry only touches SyncItem rows matching the current shop", async () => {
+  it("retry only touches SyncItem rows matching the current shop, from any terminal status", async () => {
     syncItemUpdateManyMock.mockResolvedValue({ count: 1 });
     const { action } = await import("../app._index");
 
@@ -89,8 +89,12 @@ describe("app._index action", () => {
     );
 
     expect(syncItemUpdateManyMock).toHaveBeenCalledExactlyOnceWith({
-      where: { id: "item-123", shop: SHOP, status: "error" },
-      data: { status: "pending", lastError: null },
+      where: {
+        id: "item-123",
+        shop: SHOP,
+        status: { notIn: ["pending", "processing"] },
+      },
+      data: { status: "pending", lastError: null, sevdeskInvoiceId: null },
     });
     expect(result).toEqual({ intent: "retry", retried: true });
   });

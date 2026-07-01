@@ -130,9 +130,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   if (intent === "retry") {
     const itemId = String(formData.get("itemId") ?? "");
+    // Not just error recovery — also lets a shop owner force a resync after
+    // manually deleting the SevDesk document a "success"/"duplicate_skipped"
+    // item points to. The live findInvoicesByOrderName check at process time
+    // is what actually prevents a true duplicate, not this local status.
     const result = await db.syncItem.updateMany({
-      where: { id: itemId, shop, status: "error" },
-      data: { status: "pending", lastError: null },
+      where: {
+        id: itemId,
+        shop,
+        status: { notIn: ["pending", "processing"] },
+      },
+      data: { status: "pending", lastError: null, sevdeskInvoiceId: null },
     });
     return { intent, retried: result.count > 0 };
   }
@@ -471,7 +479,7 @@ export default function Index() {
                   {new Date(item.updatedAt).toLocaleString()}
                 </s-table-cell>
                 <s-table-cell>
-                  {item.status === "error" && (
+                  {item.status !== "pending" && item.status !== "processing" && (
                     <s-button
                       variant="tertiary"
                       {...(retryFetcher.state !== "idle" &&
@@ -480,7 +488,7 @@ export default function Index() {
                         : {})}
                       onClick={() => retryItem(item.id)}
                     >
-                      Retry
+                      {item.status === "error" ? "Retry" : "Resync"}
                     </s-button>
                   )}
                 </s-table-cell>
