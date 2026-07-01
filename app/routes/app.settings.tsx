@@ -273,7 +273,7 @@ export default function Settings() {
               values={[invoiceStatusDefault]}
             >
               <s-choice value="100">Draft</s-choice>
-              <s-choice value="1000">Open</s-choice>
+              <s-choice value="1000">Paid</s-choice>
             </s-choice-list>
 
             <input
