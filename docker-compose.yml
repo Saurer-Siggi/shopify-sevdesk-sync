@@ -1,0 +1,27 @@
+services:
+  app:
+    image: ghcr.io/saurer-siggi/shopify-sevdesk-sync:latest
+    container_name: sevdesk-sync
+    hostname: sevdesk-sync
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - DATABASE_URL=file:/data/prod.sqlite
+      - SHOPIFY_API_KEY=${SHOPIFY_API_KEY:?SHOPIFY_API_KEY is required}
+      - SHOPIFY_API_SECRET=${SHOPIFY_API_SECRET:?SHOPIFY_API_SECRET is required}
+      - SCOPES=${SCOPES:?SCOPES is required}
+      - SHOPIFY_APP_URL=${SHOPIFY_APP_URL:?SHOPIFY_APP_URL is required}
+      - SEVDESK_API_TOKEN=${SEVDESK_API_TOKEN:?SEVDESK_API_TOKEN is required}
+      - SEVDESK_CONTACT_PERSON_ID=${SEVDESK_CONTACT_PERSON_ID:?SEVDESK_CONTACT_PERSON_ID is required}
+      - DOMAIN=${DOMAIN:?DOMAIN is required}
+    volumes:
+      - app-data:/data
+    networks:
+      - proxy
+
+volumes:
+  app-data:
+
+networks:
+  proxy:
+    external: true

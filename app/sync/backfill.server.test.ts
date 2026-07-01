@@ -1,0 +1,129 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const graphqlMock = vi.fn();
+const unauthenticatedAdminMock = vi.fn();
+vi.mock("../shopify.server", () => ({
+  unauthenticated: { admin: unauthenticatedAdminMock },
+}));
+
+const syncItemFindFirstMock = vi.fn();
+const syncItemCreateMock = vi.fn();
+vi.mock("../db.server", () => ({
+  default: {
+    syncItem: { findFirst: syncItemFindFirstMock, create: syncItemCreateMock },
+  },
+}));
+
+const SHOP = "example.myshopify.com";
+
+function jsonResponse(body: unknown): { json: () => Promise<unknown> } {
+  return { json: async () => body };
+}
+
+function ordersPage(
+  orders: Array<{ id: string; name: string }>,
+  hasNextPage: boolean,
+) {
+  return jsonResponse({
+    data: {
+      orders: {
+        edges: orders.map((node, i) => ({ cursor: `cursor-${i}`, node })),
+        pageInfo: { hasNextPage },
+      },
+    },
+  });
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  unauthenticatedAdminMock.mockResolvedValue({ admin: { graphql: graphqlMock } });
+});
+
+describe("triggerBackfill", () => {
+  it("enqueues SyncItem rows for orders with no existing coverage", async () => {
+    graphqlMock.mockResolvedValueOnce(
+      ordersPage([{ id: "gid://shopify/Order/1001", name: "#2001" }], false),
+    );
+    syncItemFindFirstMock.mockResolvedValueOnce(null);
+    const { triggerBackfill } = await import("./backfill.server");
+
+    const result = await triggerBackfill(SHOP, "2026-01-01", "2026-01-31");
+
+    expect(syncItemCreateMock).toHaveBeenCalledExactlyOnceWith({
+      data: {
+        shop: SHOP,
+        shopifyOrderId: "1001",
+        shopifyOrderName: "#2001",
+        topic: "backfill",
+      },
+    });
+    expect(result).toEqual({ enqueued: 1, truncated: false });
+  });
+
+  it("skips orders that already have a non-error SyncItem row", async () => {
+    graphqlMock.mockResolvedValueOnce(
+      ordersPage([{ id: "gid://shopify/Order/1002", name: "#2002" }], false),
+    );
+    syncItemFindFirstMock.mockResolvedValueOnce({
+      id: "existing-1",
+      status: "success",
+    });
+    const { triggerBackfill } = await import("./backfill.server");
+
+    const result = await triggerBackfill(SHOP, "2026-01-01", "2026-01-31");
+
+    expect(syncItemCreateMock).not.toHaveBeenCalled();
+    expect(result).toEqual({ enqueued: 0, truncated: false });
+  });
+
+  it("does enqueue when the only existing row for the order is an error", async () => {
+    graphqlMock.mockResolvedValueOnce(
+      ordersPage([{ id: "gid://shopify/Order/1003", name: "#2003" }], false),
+    );
+    syncItemFindFirstMock.mockResolvedValueOnce(null);
+    const { triggerBackfill } = await import("./backfill.server");
+
+    const result = await triggerBackfill(SHOP, "2026-01-01", "2026-01-31");
+
+    expect(syncItemFindFirstMock).toHaveBeenCalledExactlyOnceWith({
+      where: { shop: SHOP, shopifyOrderId: "1003", status: { not: "error" } },
+    });
+    expect(syncItemCreateMock).toHaveBeenCalledOnce();
+    expect(result).toEqual({ enqueued: 1, truncated: false });
+  });
+
+  it("pages through results until hasNextPage is false", async () => {
+    graphqlMock
+      .mockResolvedValueOnce(
+        ordersPage([{ id: "gid://shopify/Order/2001", name: "#3001" }], true),
+      )
+      .mockResolvedValueOnce(
+        ordersPage([{ id: "gid://shopify/Order/2002", name: "#3002" }], false),
+      );
+    syncItemFindFirstMock.mockResolvedValue(null);
+    const { triggerBackfill } = await import("./backfill.server");
+
+    const result = await triggerBackfill(SHOP, "2026-01-01", "2026-02-28");
+
+    expect(graphqlMock).toHaveBeenCalledTimes(2);
+    const secondCallVariables = graphqlMock.mock.calls[1][1] as {
+      variables: { after: string | null };
+    };
+    expect(secondCallVariables.variables.after).toBe("cursor-0");
+    expect(result).toEqual({ enqueued: 2, truncated: false });
+  });
+
+  it("reports truncated when the page cap is hit before pagination ends", async () => {
+    graphqlMock.mockImplementation(() =>
+      Promise.resolve(
+        ordersPage([{ id: "gid://shopify/Order/9999", name: "#9999" }], true),
+      ),
+    );
+    syncItemFindFirstMock.mockResolvedValue(null);
+    const { triggerBackfill } = await import("./backfill.server");
+
+    const result = await triggerBackfill(SHOP, "2020-01-01", "2026-01-01");
+
+    expect(result.truncated).toBe(true);
+  });
+});

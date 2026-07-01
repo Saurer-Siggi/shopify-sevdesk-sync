@@ -1,0 +1,59 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// Note that some adapters may set a maximum length for the String type by default, please ensure your strings are long
+// enough when changing adapters.
+// See https://www.prisma.io/docs/orm/reference/prisma-schema-reference#string for more information
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id            String    @id
+  shop          String
+  state         String
+  isOnline      Boolean   @default(false)
+  scope         String?
+  expires       DateTime?
+  accessToken   String
+  userId        BigInt?
+  firstName     String?
+  lastName      String?
+  email         String?
+  accountOwner  Boolean   @default(false)
+  locale        String?
+  collaborator  Boolean?  @default(false)
+  emailVerified Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+// Not the dedup source of truth — that's always a live SevDesk query (see app/sevdesk).
+model SyncSettings {
+  shop        String   @id
+  syncEnabled Boolean  @default(false)
+  updatedAt   DateTime @updatedAt
+}
+
+// Doubles as the worker's queue (status = "pending") and the admin UI's log. No customer PII.
+model SyncItem {
+  id               String   @id @default(cuid())
+  shop             String
+  shopifyOrderId   String
+  shopifyOrderName String
+  topic            String
+  status           String   @default("pending")
+  attempts         Int      @default(0)
+  lastError        String?
+  sevdeskInvoiceId String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([shop, status])
+  @@index([shop, shopifyOrderId])
+}
