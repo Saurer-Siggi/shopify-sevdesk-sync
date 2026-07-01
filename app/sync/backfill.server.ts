@@ -30,6 +30,27 @@ interface OrdersForBackfillResponse {
   };
 }
 
+function toBareOrderId(gid: string): string {
+  // Bare numeric id, matching the format webhook routes store (see webhooks.orders.create.tsx).
+  return gid.replace("gid://shopify/Order/", "");
+}
+
+async function enqueueBackfillItem(
+  shop: string,
+  shopifyOrderId: string,
+  shopifyOrderName: string,
+): Promise<boolean> {
+  const existing = await db.syncItem.findFirst({
+    where: { shop, shopifyOrderId, status: { not: "error" } },
+  });
+  if (existing) return false;
+
+  await db.syncItem.create({
+    data: { shop, shopifyOrderId, shopifyOrderName, topic: "backfill" },
+  });
+  return true;
+}
+
 export async function triggerBackfill(
   shop: string,
   dateFrom: string,
@@ -49,23 +70,12 @@ export async function triggerBackfill(
     const { data } = (await response.json()) as OrdersForBackfillResponse;
 
     for (const { node } of data.orders.edges) {
-      // Bare numeric id, matching the format webhook routes store (see webhooks.orders.create.tsx).
-      const shopifyOrderId = node.id.replace("gid://shopify/Order/", "");
-
-      const existing = await db.syncItem.findFirst({
-        where: { shop, shopifyOrderId, status: { not: "error" } },
-      });
-      if (existing) continue;
-
-      await db.syncItem.create({
-        data: {
-          shop,
-          shopifyOrderId,
-          shopifyOrderName: node.name,
-          topic: "backfill",
-        },
-      });
-      enqueued++;
+      const didEnqueue = await enqueueBackfillItem(
+        shop,
+        toBareOrderId(node.id),
+        node.name,
+      );
+      if (didEnqueue) enqueued++;
     }
 
     if (!data.orders.pageInfo.hasNextPage) break;
@@ -77,4 +87,68 @@ export async function triggerBackfill(
   }
 
   return { enqueued, truncated };
+}
+
+export async function syncSingleOrder(
+  shop: string,
+  shopifyOrderId: string,
+  shopifyOrderName: string,
+): Promise<{ enqueued: boolean }> {
+  const enqueued = await enqueueBackfillItem(
+    shop,
+    shopifyOrderId,
+    shopifyOrderName,
+  );
+  return { enqueued };
+}
+
+const RECENT_ORDERS_QUERY = `#graphql
+  query RecentOrdersForPicker($first: Int!) {
+    orders(first: $first, sortKey: CREATED_AT, reverse: true) {
+      nodes {
+        id
+        name
+        createdAt
+        displayFinancialStatus
+      }
+    }
+  }
+`;
+
+interface RecentOrdersResponse {
+  data: {
+    orders: {
+      nodes: Array<{
+        id: string;
+        name: string;
+        createdAt: string;
+        displayFinancialStatus: string | null;
+      }>;
+    };
+  };
+}
+
+export interface RecentOrder {
+  shopifyOrderId: string;
+  shopifyOrderName: string;
+  createdAt: string;
+  financialStatus: string | null;
+}
+
+export async function listRecentOrders(
+  shop: string,
+  limit = 25,
+): Promise<RecentOrder[]> {
+  const { admin } = await unauthenticated.admin(shop);
+  const response = await admin.graphql(RECENT_ORDERS_QUERY, {
+    variables: { first: limit },
+  });
+  const { data } = (await response.json()) as RecentOrdersResponse;
+
+  return data.orders.nodes.map((node) => ({
+    shopifyOrderId: toBareOrderId(node.id),
+    shopifyOrderName: node.name,
+    createdAt: node.createdAt,
+    financialStatus: node.displayFinancialStatus,
+  }));
 }

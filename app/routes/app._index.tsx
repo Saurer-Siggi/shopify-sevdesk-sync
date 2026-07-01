@@ -9,7 +9,11 @@ import { useAppBridge } from "@shopify/app-bridge-react";
 import { boundary } from "@shopify/shopify-app-react-router/server";
 import { authenticate } from "../shopify.server";
 import db from "../db.server";
-import { triggerBackfill } from "../sync/backfill.server";
+import {
+  listRecentOrders,
+  syncSingleOrder,
+  triggerBackfill,
+} from "../sync/backfill.server";
 
 const STATUSES = [
   "pending",
@@ -62,10 +66,27 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     return acc;
   }, {} as StatusCounts);
 
+  const recentOrders = await listRecentOrders(shop);
+  const coverage = await db.syncItem.findMany({
+    where: {
+      shop,
+      shopifyOrderId: { in: recentOrders.map((o) => o.shopifyOrderId) },
+    },
+    orderBy: { updatedAt: "desc" },
+  });
+  const orders = recentOrders.map((order) => ({
+    ...order,
+    // Display only — SevDesk's own dedup check is still what's authoritative.
+    syncStatus:
+      coverage.find((c) => c.shopifyOrderId === order.shopifyOrderId)
+        ?.status ?? null,
+  }));
+
   return {
     syncEnabled: settings.syncEnabled,
     items,
     statusCounts,
+    orders,
   };
 };
 
@@ -95,6 +116,17 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     return { intent, enqueued, truncated };
   }
 
+  if (intent === "sync-order") {
+    const shopifyOrderId = String(formData.get("shopifyOrderId") ?? "");
+    const shopifyOrderName = String(formData.get("shopifyOrderName") ?? "");
+    const { enqueued } = await syncSingleOrder(
+      shop,
+      shopifyOrderId,
+      shopifyOrderName,
+    );
+    return { intent, enqueued, shopifyOrderId };
+  }
+
   if (intent === "retry") {
     const itemId = String(formData.get("itemId") ?? "");
     const result = await db.syncItem.updateMany({
@@ -108,12 +140,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 };
 
 export default function Index() {
-  const { syncEnabled, items, statusCounts } = useLoaderData<typeof loader>();
+  const { syncEnabled, items, statusCounts, orders } =
+    useLoaderData<typeof loader>();
   const shopify = useAppBridge();
 
   const toggleFetcher = useFetcher<typeof action>();
   const backfillFetcher = useFetcher<typeof action>();
   const retryFetcher = useFetcher<typeof action>();
+  const syncOrderFetcher = useFetcher<typeof action>();
 
   const isToggling = toggleFetcher.state !== "idle";
   const isBackfilling = backfillFetcher.state !== "idle";
@@ -143,8 +177,25 @@ export default function Index() {
     }
   }, [retryFetcher.data, shopify]);
 
+  useEffect(() => {
+    if (syncOrderFetcher.data?.intent === "sync-order") {
+      shopify.toast.show(
+        syncOrderFetcher.data.enqueued
+          ? "Order queued for sync"
+          : "Already queued or synced — see status below",
+      );
+    }
+  }, [syncOrderFetcher.data, shopify]);
+
   const toggleSync = () => {
     toggleFetcher.submit({ intent: "toggle" }, { method: "POST" });
+  };
+
+  const syncOrder = (shopifyOrderId: string, shopifyOrderName: string) => {
+    syncOrderFetcher.submit(
+      { intent: "sync-order", shopifyOrderId, shopifyOrderName },
+      { method: "POST" },
+    );
   };
 
   const submitBackfill = (event: React.FormEvent<HTMLFormElement>) => {
@@ -169,6 +220,62 @@ export default function Index() {
             onChange={toggleSync}
           />
         </s-stack>
+      </s-section>
+
+      <s-section heading="Recent Shopify orders">
+        <s-paragraph>
+          Pick a single order to sync now, independent of the live-sync
+          toggle above.
+        </s-paragraph>
+        <s-table variant="auto">
+          <s-table-header-row>
+            <s-table-header>Order</s-table-header>
+            <s-table-header>Date</s-table-header>
+            <s-table-header>Financial status</s-table-header>
+            <s-table-header>Sync status</s-table-header>
+            <s-table-header>Action</s-table-header>
+          </s-table-header-row>
+          <s-table-body>
+            {orders.map((order) => (
+              <s-table-row key={order.shopifyOrderId}>
+                <s-table-cell>{order.shopifyOrderName}</s-table-cell>
+                <s-table-cell>
+                  {new Date(order.createdAt).toLocaleDateString()}
+                </s-table-cell>
+                <s-table-cell>{order.financialStatus ?? ""}</s-table-cell>
+                <s-table-cell>
+                  {order.syncStatus ? (
+                    <s-badge
+                      tone={
+                        BADGE_TONE[order.syncStatus as keyof StatusCounts] ??
+                        "neutral"
+                      }
+                    >
+                      {order.syncStatus}
+                    </s-badge>
+                  ) : (
+                    "not queued"
+                  )}
+                </s-table-cell>
+                <s-table-cell>
+                  <s-button
+                    variant="tertiary"
+                    {...(syncOrderFetcher.state !== "idle" &&
+                    syncOrderFetcher.formData?.get("shopifyOrderId") ===
+                      order.shopifyOrderId
+                      ? { loading: true }
+                      : {})}
+                    onClick={() =>
+                      syncOrder(order.shopifyOrderId, order.shopifyOrderName)
+                    }
+                  >
+                    Sync this order
+                  </s-button>
+                </s-table-cell>
+              </s-table-row>
+            ))}
+          </s-table-body>
+        </s-table>
       </s-section>
 
       <s-section heading="Historical backfill">

@@ -22,8 +22,12 @@ vi.mock("../../db.server", () => ({
 }));
 
 const triggerBackfillMock = vi.fn();
+const syncSingleOrderMock = vi.fn();
+const listRecentOrdersMock = vi.fn();
 vi.mock("../../sync/backfill.server", () => ({
   triggerBackfill: triggerBackfillMock,
+  syncSingleOrder: syncSingleOrderMock,
+  listRecentOrders: listRecentOrdersMock,
 }));
 
 const SHOP = "example.myshopify.com";
@@ -102,5 +106,29 @@ describe("app._index action", () => {
     );
 
     expect(result).toEqual({ intent: "retry", retried: false });
+  });
+
+  it("sync-order enqueues a single picked order", async () => {
+    syncSingleOrderMock.mockResolvedValue({ enqueued: true });
+    const { action } = await import("../app._index");
+
+    const result = await action(
+      makeArgs({
+        intent: "sync-order",
+        shopifyOrderId: "123",
+        shopifyOrderName: "#1050",
+      }),
+    );
+
+    expect(syncSingleOrderMock).toHaveBeenCalledExactlyOnceWith(
+      SHOP,
+      "123",
+      "#1050",
+    );
+    expect(result).toEqual({
+      intent: "sync-order",
+      enqueued: true,
+      shopifyOrderId: "123",
+    });
   });
 });
